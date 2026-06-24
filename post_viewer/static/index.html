@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>easy-viewer</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260624-card-footer-copy" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="app-header">
+        <div>
+          <h1>easy-viewer</h1>
+          <p id="sourceLine">正在读取 MySQL 数据...</p>
+        </div>
+        <button id="refreshButton" type="button">刷新</button>
+      </header>
+
+      <div class="workspace">
+        <aside class="dimension-panel" aria-label="维度组合选择">
+          <div class="dimension-panel-head">
+            <div>
+              <strong>维度组合</strong>
+              <span>左侧多选，右侧即时展示结果</span>
+            </div>
+            <button id="clearDimensionsButton" class="secondary compact" type="button">清空</button>
+          </div>
+          <div id="dimensionGroups" class="dimension-groups">
+            <span class="dimension-loading">正在加载维度字典...</span>
+          </div>
+        </aside>
+
+        <section class="data-panel" aria-label="帖子数据">
+          <section class="query-bar" aria-label="筛选条件">
+            <label>
+              <span>批次</span>
+              <select id="batchSelect"></select>
+            </label>
+            <label>
+              <span>风格</span>
+              <select id="styleSelect">
+                <option value="">全部风格</option>
+              </select>
+            </label>
+            <label>
+              <span>状态</span>
+              <select id="statusSelect">
+                <option value="">全部状态</option>
+              </select>
+            </label>
+            <label class="search-field">
+              <span>关键词</span>
+              <input id="searchInput" type="search" placeholder="搜索标题、正文、标签、维度、run_id" />
+            </label>
+            <button id="resetButton" class="secondary" type="button">重置筛选</button>
+          </section>
+
+          <section class="summary" id="summary"></section>
+
+          <section id="resultsList" class="results-list" aria-label="帖子列表">
+            <div class="empty-state">正在加载...</div>
+          </section>
+        </section>
+      </div>
+    </main>
+
+    <script src="/static/app.js?v=20260624-card-footer-copy"></script>
+  </body>
+</html>
