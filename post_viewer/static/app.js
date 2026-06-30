@@ -8,9 +8,61 @@ const state = {
   selectedOptions: {},
   openCategory: "",
   keyword: "",
+  activeView: "posts",
 };
 
 const $ = (selector) => document.querySelector(selector);
+
+function viewFromPath() {
+  if (window.location.pathname === "/rerun") return "rerun";
+  if (window.location.pathname === "/settlements") return "settlements";
+  if (window.location.pathname === "/kol-metrics") return "kolMetrics";
+  return "posts";
+}
+
+function viewPath(view) {
+  if (view === "kolMetrics") return "/kol-metrics";
+  if (view === "settlements") return "/settlements";
+  return view === "rerun" ? "/rerun" : "/";
+}
+
+function isPostsViewActive() {
+  return state.activeView === "posts";
+}
+
+function setActiveView(view, options = {}) {
+  state.activeView = ["posts", "rerun", "settlements", "kolMetrics"].includes(view) ? view : "posts";
+  document.querySelectorAll("[data-view]").forEach((section) => {
+    section.hidden = section.dataset.view !== state.activeView;
+  });
+  const pageSelect = document.querySelector("#pageSelect");
+  if (pageSelect) {
+    pageSelect.value = state.activeView;
+  }
+  $("#refreshButton").hidden = state.activeView !== "posts";
+  if (state.activeView === "rerun") {
+    $("#sourceLine").textContent = "重跑帖子阅读数";
+  } else if (state.activeView === "settlements") {
+    $("#sourceLine").textContent = "大V商单结算";
+  } else if (state.activeView === "kolMetrics") {
+    $("#sourceLine").textContent = "每日 KOL 指标";
+  }
+  if (options.push) {
+    window.history.pushState({ view: state.activeView }, "", viewPath(state.activeView));
+  }
+}
+
+function bindViewNavigation() {
+  const pageSelect = document.querySelector("#pageSelect");
+  if (pageSelect) {
+    pageSelect.addEventListener("change", () => {
+      window.location.href = viewPath(pageSelect.value);
+    });
+  }
+  window.addEventListener("popstate", () => {
+    setActiveView(viewFromPath());
+  });
+}
 
 async function api(path) {
   const response = await fetch(path);
@@ -70,6 +122,9 @@ function restoreUrlState() {
 }
 
 function syncUrlState() {
+  if (!isPostsViewActive()) {
+    return;
+  }
   const params = new URLSearchParams();
   const batch = parseBatchValue(currentBatchValue());
   if (batch.tradeDate) params.set("trade_date", batch.tradeDate);
@@ -460,10 +515,14 @@ function bindEvents() {
 
 async function boot() {
   restoreUrlState();
+  bindViewNavigation();
+  setActiveView(viewFromPath());
   bindEvents();
   applyInputsFromState();
-  await loadDimensions();
-  await refresh();
+  if (isPostsViewActive()) {
+    await loadDimensions();
+    await refresh();
+  }
 }
 
 boot().catch(renderError);

@@ -12,6 +12,7 @@ class FakeCursor:
     def __init__(self, connection: "FakeConnection") -> None:
         self.connection = connection
         self.result: list[dict[str, Any]] = []
+        self.rowcount = 0
 
     def __enter__(self) -> "FakeCursor":
         return self
@@ -126,6 +127,153 @@ class FakeConnection:
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
 
+    def commit(self) -> None:
+        return None
+
+
+class RerunCursor:
+    def __init__(self, connection: "RerunConnection") -> None:
+        self.connection = connection
+        self.result: list[dict[str, Any]] = []
+        self.rowcount = 0
+
+    def __enter__(self) -> "RerunCursor":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+        self.connection.queries.append((sql, params))
+        if "SELECT id, task_type, post_url" in sql and "post_url IN" in sql:
+            self.result = [
+                {
+                    "id": 101,
+                    "task_type": "detail",
+                    "post_url": "https://ur.alipay.com/a",
+                    "account_name": "acct",
+                    "document_id": 1,
+                    "row_index": 8,
+                    "status": "failed",
+                    "attempts": 3,
+                    "updated_at": "2026-06-30 10:00:00",
+                }
+            ]
+        elif "UPDATE crawler_app.task_submissions" in sql:
+            self.rowcount = 1
+            self.connection.updated_params = params
+        elif "WHERE id IN" in sql:
+            self.result = [
+                {
+                    "id": 101,
+                    "task_type": "detail",
+                    "post_url": "https://ur.alipay.com/a",
+                    "account_name": "acct",
+                    "document_id": 1,
+                    "row_index": 8,
+                    "status": "pending",
+                    "attempts": 1,
+                    "updated_at": "2026-06-30 10:01:00",
+                }
+            ]
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self.result
+
+
+class RerunConnection:
+    def __init__(self) -> None:
+        self.queries: list[tuple[str, tuple[Any, ...]]] = []
+        self.updated_params: tuple[Any, ...] = ()
+        self.committed = False
+
+    def __enter__(self) -> "RerunConnection":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> RerunCursor:
+        return RerunCursor(self)
+
+    def commit(self) -> None:
+        self.committed = True
+
+
+class KolMetricsCursor:
+    def __init__(self, connection: "KolMetricsConnection") -> None:
+        self.connection = connection
+        self.result: list[dict[str, Any]] = []
+
+    def __enter__(self) -> "KolMetricsCursor":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+        self.connection.queries.append((sql, params))
+        if "SELECT DISTINCT m.metric_date" in sql:
+            self.result = [{"metric_date": "2026-06-30"}]
+        elif "SELECT DISTINCT m.platform" in sql:
+            self.result = [{"platform": "wechat"}]
+        elif "SELECT DISTINCT COALESCE" in sql:
+            self.result = [{"kol_type": "external"}]
+        elif "COUNT(*) AS total_rows" in sql:
+            self.result = [
+                {
+                    "total_rows": 1,
+                    "date_count": 1,
+                    "kol_count": 1,
+                    "fans_rows": 1,
+                    "growth_rows": 1,
+                    "read_rows": 1,
+                    "post_rows": 1,
+                    "internal_rows": 0,
+                    "unmatched_base_rows": 0,
+                }
+            ]
+        elif "ORDER BY" in sql and "LIMIT %s" in sql:
+            self.result = [
+                {
+                    "metric_date": "2026-06-30",
+                    "kol_name": "acct",
+                    "platform": "wechat",
+                    "homepage_url": "https://example.com/acct",
+                    "group_name": "community",
+                    "kol_type": "external",
+                    "fans_count": 1000,
+                    "growth_count": 12,
+                    "read_count": 345,
+                    "post_count_24h": 2,
+                    "source_payload_json": "{}",
+                    "writeback_error": "",
+                    "updated_at": "2026-06-30 12:00:00",
+                }
+            ]
+        else:
+            self.result = []
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self.result[0] if self.result else None
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self.result
+
+
+class KolMetricsConnection:
+    def __init__(self) -> None:
+        self.queries: list[tuple[str, tuple[Any, ...]]] = []
+
+    def __enter__(self) -> "KolMetricsConnection":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> KolMetricsCursor:
+        return KolMetricsCursor(self)
+
 
 def test_posts_api_reads_mysql_rows(monkeypatch) -> None:
     monkeypatch.setattr(api, "_connect", lambda: FakeConnection())
@@ -173,3 +321,45 @@ def test_dimensions_api_reads_mysql_dimension_catalog(monkeypatch) -> None:
     assert [option["name"] for option in body[0]["options"]] == ["持有", "踏空"]
     assert body[1]["category_id"] == "content_goal"
     assert body[1]["options"][0]["option_id"] == "content_goal:emotional_resonance"
+
+
+def test_rerun_posts_resets_detail_task_submissions(monkeypatch) -> None:
+    connection = RerunConnection()
+    monkeypatch.setattr(api, "_connect", lambda: connection)
+    client = TestClient(api.create_app())
+
+    response = client.post(
+        "/api/rerun-posts",
+        json={"post_urls": ["https://ur.alipay.com/a", "https://ur.alipay.com/a", "https://ur.alipay.com/missing"]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["requested_count"] == 2
+    assert body["matched_count"] == 1
+    assert body["updated_count"] == 1
+    assert body["unmatched_urls"] == ["https://ur.alipay.com/missing"]
+    assert body["rows"][0]["status"] == "pending"
+    assert body["rows"][0]["attempts"] == 1
+    assert connection.updated_params == ("pending", 1, "detail", 101)
+    assert connection.committed is True
+
+
+def test_kol_metrics_api_reads_crawler_app_metrics(monkeypatch) -> None:
+    connection = KolMetricsConnection()
+    monkeypatch.setattr(api, "_connect", lambda: connection)
+    client = TestClient(api.create_app())
+
+    response = client.get("/api/kol-metrics?date=2026-06-30&platform=wechat&limit=10")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "mysql"
+    assert body["tables"] == ["crawler_app.kol_daily_metrics", "crawler_app.kol_base_profiles"]
+    assert body["summary"]["total_rows"] == 1
+    assert body["options"]["dates"] == ["2026-06-30"]
+    assert body["rows"][0]["kol_name"] == "acct"
+    assert body["rows"][0]["read_count"] == 345
+    assert body["filters"]["metric_date"] == "2026-06-30"
+    assert any("crawler_app.kol_daily_metrics" in sql for sql, _params in connection.queries)
+    assert any("crawler_app.kol_base_profiles" in sql for sql, _params in connection.queries)

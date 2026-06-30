@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>easy-viewer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260624-card-footer-copy" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260630-mysql-query-table" />
   </head>
   <body>
     <main class="page">
@@ -13,57 +13,221 @@
           <h1>easy-viewer</h1>
           <p id="sourceLine">正在读取 MySQL 数据...</p>
         </div>
-        <button id="refreshButton" type="button">刷新</button>
+        <div class="header-actions">
+          <button id="refreshButton" type="button">刷新</button>
+        </div>
       </header>
 
-      <div class="workspace">
-        <aside class="dimension-panel" aria-label="维度组合选择">
-          <div class="dimension-panel-head">
-            <div>
-              <strong>维度组合</strong>
-              <span>左侧多选，右侧即时展示结果</span>
+      <section class="app-switcher" aria-label="页面切换">
+        <label>
+          <span>页面</span>
+          <select id="pageSelect">
+            <option value="posts">每日社区帖子</option>
+            <option value="rerun">重跑帖子阅读数</option>
+            <option value="settlements">大V商单结算</option>
+            <option value="kolMetrics">每日 KOL 指标</option>
+          </select>
+        </label>
+      </section>
+
+      <section id="postsView" class="app-view" data-view="posts">
+        <div class="workspace">
+          <aside class="dimension-panel" aria-label="维度组合选择">
+            <div class="dimension-panel-head">
+              <div>
+                <strong>维度组合</strong>
+                <span>左侧多选，右侧即时展示结果</span>
+              </div>
+              <button id="clearDimensionsButton" class="secondary compact" type="button">清空</button>
             </div>
-            <button id="clearDimensionsButton" class="secondary compact" type="button">清空</button>
-          </div>
-          <div id="dimensionGroups" class="dimension-groups">
-            <span class="dimension-loading">正在加载维度字典...</span>
-          </div>
-        </aside>
+            <div id="dimensionGroups" class="dimension-groups">
+              <span class="dimension-loading">正在加载维度字典...</span>
+            </div>
+          </aside>
 
-        <section class="data-panel" aria-label="帖子数据">
-          <section class="query-bar" aria-label="筛选条件">
-            <label>
-              <span>批次</span>
-              <select id="batchSelect"></select>
-            </label>
-            <label>
-              <span>风格</span>
-              <select id="styleSelect">
-                <option value="">全部风格</option>
-              </select>
-            </label>
-            <label>
-              <span>状态</span>
-              <select id="statusSelect">
-                <option value="">全部状态</option>
-              </select>
-            </label>
-            <label class="search-field">
-              <span>关键词</span>
-              <input id="searchInput" type="search" placeholder="搜索标题、正文、标签、维度、run_id" />
-            </label>
-            <button id="resetButton" class="secondary" type="button">重置筛选</button>
+          <section class="data-panel" aria-label="帖子数据">
+            <section class="query-bar" aria-label="筛选条件">
+              <label>
+                <span>批次</span>
+                <select id="batchSelect"></select>
+              </label>
+              <label>
+                <span>风格</span>
+                <select id="styleSelect">
+                  <option value="">全部风格</option>
+                </select>
+              </label>
+              <label>
+                <span>状态</span>
+                <select id="statusSelect">
+                  <option value="">全部状态</option>
+                </select>
+              </label>
+              <label class="search-field">
+                <span>关键词</span>
+                <input id="searchInput" type="search" placeholder="搜索标题、正文、标签、维度、run_id" />
+              </label>
+              <button id="resetButton" class="secondary" type="button">重置筛选</button>
+            </section>
+
+            <section class="summary" id="summary"></section>
+
+            <section id="resultsList" class="results-list" aria-label="帖子列表">
+              <div class="empty-state">正在加载...</div>
+            </section>
           </section>
+        </div>
+      </section>
 
-          <section class="summary" id="summary"></section>
-
-          <section id="resultsList" class="results-list" aria-label="帖子列表">
-            <div class="empty-state">正在加载...</div>
-          </section>
+      <section id="rerunView" class="app-view" data-view="rerun" hidden>
+        <section class="rerun-panel" aria-label="重跑帖子阅读数">
+          <div class="section-head">
+            <div>
+              <h2>重跑帖子阅读数</h2>
+              <p id="rerunSourceLine">crawler_app.task_submissions / detail</p>
+            </div>
+          </div>
+          <label class="rerun-input">
+            <span>帖子链接</span>
+            <textarea id="postUrlsInput" spellcheck="false" placeholder="https://ur.alipay.com/xxxxx"></textarea>
+          </label>
+          <div class="rerun-actions">
+            <button id="rerunButton" type="button">查找并重置</button>
+            <button id="clearRerunButton" class="secondary" type="button">清空</button>
+          </div>
         </section>
-      </div>
+
+        <section class="summary rerun-summary" id="rerunSummary"></section>
+
+        <section id="rerunResults" class="rerun-results" aria-label="重跑结果">
+          <div class="empty-state">等待输入链接</div>
+        </section>
+      </section>
+
+      <section id="settlementsView" class="app-view" data-view="settlements" hidden>
+        <section class="settlement-panel" aria-label="大V商单结算">
+          <div class="section-head settlement-head">
+            <div>
+              <h2>大V商单结算</h2>
+              <p id="settlementSourceLine">按链接补全标题、阅读量、评论、点赞、截图和粉丝数</p>
+            </div>
+            <div class="settlement-actions">
+              <button id="refreshSettlementButton" type="button">刷新</button>
+              <button id="importSettlementButton" class="secondary" type="button">导入</button>
+              <input id="importSettlementFileInput" type="file" accept=".xlsx,.csv,.tsv,.txt" hidden />
+              <button id="autofillAllSettlementButton" class="secondary" type="button">补全全部</button>
+              <button id="exportSettlementButton" class="secondary" type="button">导出 CSV</button>
+            </div>
+          </div>
+
+          <section class="summary settlement-summary" id="settlementSummary"></section>
+
+          <div class="settlement-table-wrap">
+            <table class="settlement-table" aria-label="大V商单结算表">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>日期</th>
+                  <th>合作方</th>
+                  <th>产品</th>
+                  <th>IP名称</th>
+                  <th>粉丝数</th>
+                  <th>文章类型</th>
+                  <th>费用</th>
+                  <th>创作者费用</th>
+                  <th>大V类型</th>
+                  <th>买入金额</th>
+                  <th>链接</th>
+                  <th>文章标题</th>
+                  <th>截图</th>
+                  <th>阅读量</th>
+                  <th>评论</th>
+                  <th>点赞</th>
+                  <th>打款进度-合作方</th>
+                  <th>结算进度-创作者</th>
+                  <th>备注</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="settlementTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="kolMetricsView" class="app-view" data-view="kolMetrics" hidden>
+        <section class="kol-panel" aria-label="每日 KOL 指标">
+          <div class="section-head kol-head">
+            <div>
+              <h2>每日 KOL 指标</h2>
+              <p id="kolMetricsSourceLine">crawler_app.kol_daily_metrics / kol_base_profiles</p>
+            </div>
+            <div class="kol-actions">
+              <button id="kolMetricsRefreshButton" type="button">刷新</button>
+              <button id="kolMetricsCopyButton" class="secondary" type="button">复制表格</button>
+              <button id="kolMetricsExportButton" class="secondary" type="button">下载 Excel</button>
+            </div>
+          </div>
+
+          <section class="kol-filter-bar" aria-label="KOL 指标筛选">
+            <label>
+              <span>日期</span>
+              <select id="kolDateSelect"></select>
+            </label>
+            <label>
+              <span>平台</span>
+              <select id="kolPlatformSelect"></select>
+            </label>
+            <label>
+              <span>类型</span>
+              <select id="kolTypeSelect"></select>
+            </label>
+            <label>
+              <span>空值筛选</span>
+              <select id="kolMissingSelect"></select>
+            </label>
+            <label>
+              <span>排序</span>
+              <select id="kolSortSelect"></select>
+            </label>
+            <label>
+              <span>搜索</span>
+              <input id="kolSearchInput" type="search" placeholder="大V名称 / 群" />
+            </label>
+            <label>
+              <span>行数</span>
+              <input id="kolLimitInput" type="number" min="1" max="2000" value="500" />
+            </label>
+          </section>
+
+          <section class="summary kol-summary" id="kolMetricsSummary"></section>
+
+          <div class="kol-table-wrap">
+            <table class="kol-table" aria-label="每日 KOL 指标表">
+              <thead id="kolMetricsTableHead"></thead>
+              <tbody id="kolMetricsTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
     </main>
 
-    <script src="/static/app.js?v=20260624-card-footer-copy"></script>
+    <script>
+      (() => {
+        const path = window.location.pathname;
+        const activeView = path === "/rerun" ? "rerun" : path === "/settlements" ? "settlements" : path === "/kol-metrics" ? "kolMetrics" : "posts";
+        document.querySelectorAll("[data-view]").forEach((section) => {
+          section.hidden = section.dataset.view !== activeView;
+        });
+        const pageSelect = document.querySelector("#pageSelect");
+        if (pageSelect) pageSelect.value = activeView;
+        const refreshButton = document.querySelector("#refreshButton");
+        if (refreshButton) refreshButton.hidden = activeView !== "posts";
+      })();
+    </script>
+    <script src="/static/app.js?v=20260630-mysql-query-table"></script>
+    <script src="/static/rerun.js?v=20260630-mysql-query-table"></script>
+    <script src="/static/settlements.js?v=20260630-mysql-query-table"></script>
+    <script src="/static/kol_metrics.js?v=20260630-kol-metrics"></script>
   </body>
 </html>
