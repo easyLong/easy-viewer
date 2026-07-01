@@ -49,6 +49,17 @@
     return Number.isFinite(number) ? number.toLocaleString("zh-CN") : String(value);
   }
 
+  function isEmpty(value) {
+    return value === null || value === undefined || value === "";
+  }
+
+  function mysqlValue(value) {
+    if (isEmpty(value)) {
+      return `<span class="mysql-null">NULL</span>`;
+    }
+    return escapeHtml(value);
+  }
+
   function optionList(values, selected, blankLabel) {
     return [
       `<option value="">${escapeHtml(blankLabel)}</option>`,
@@ -138,22 +149,26 @@
     const payload = state.payload || {};
     const columns = payload.columns || [];
     const rows = payload.rows || [];
-    $("#kolMetricsTableHead").innerHTML = `<tr>${columns.map(([title]) => `<th>${escapeHtml(title)}</th>`).join("")}</tr>`;
+    $("#kolMetricsTableHead").innerHTML = `<tr><th>#</th>${columns.map(([title]) => `<th>${escapeHtml(title)}</th>`).join("")}</tr>`;
     if (!rows.length) {
-      $("#kolMetricsTableBody").innerHTML = `<tr><td colspan="${columns.length || 1}" class="muted-cell">没有数据</td></tr>`;
+      $("#kolMetricsTableBody").innerHTML = `<tr><td colspan="${(columns.length || 0) + 1}" class="mysql-empty-row">Empty set</td></tr>`;
       return;
     }
     const numericKeys = new Set(["fans_count", "growth_count", "read_count", "post_count_24h"]);
+    const wideKeys = new Set(["kol_name", "homepage_url", "source_doc_url", "target_doc_url"]);
     $("#kolMetricsTableBody").innerHTML = rows
-      .map((row) => {
+      .map((row, index) => {
         const cells = columns.map(([, key]) => {
           if (key === "homepage_url" && row[key]) {
-            return `<td><a href="${escapeHtml(row[key])}" target="_blank" rel="noreferrer">打开</a></td>`;
+            return `<td class="mysql-cell mysql-wide"><a class="mysql-link" href="${escapeHtml(row[key])}" target="_blank" rel="noreferrer">${escapeHtml(row[key])}</a></td>`;
           }
           const value = numericKeys.has(key) ? numberText(row[key]) : row[key];
-          return `<td${numericKeys.has(key) ? ' class="number-cell"' : ""}>${escapeHtml(value)}</td>`;
+          const classNames = ["mysql-cell"];
+          if (numericKeys.has(key)) classNames.push("mysql-number");
+          if (wideKeys.has(key)) classNames.push("mysql-wide");
+          return `<td class="${classNames.join(" ")}">${mysqlValue(value)}</td>`;
         });
-        return `<tr>${cells.join("")}</tr>`;
+        return `<tr><td class="mysql-row-index">${index + 1}</td>${cells.join("")}</tr>`;
       })
       .join("");
   }
@@ -163,7 +178,7 @@
     $("#kolMetricsSourceLine").textContent = message;
     $("#kolMetricsSummary").innerHTML = "";
     $("#kolMetricsTableHead").innerHTML = "";
-    $("#kolMetricsTableBody").innerHTML = `<tr><td class="muted-cell">${escapeHtml(message)}</td></tr>`;
+    $("#kolMetricsTableBody").innerHTML = `<tr><td class="mysql-empty-row">${escapeHtml(message)}</td></tr>`;
   }
 
   async function loadKolMetrics() {

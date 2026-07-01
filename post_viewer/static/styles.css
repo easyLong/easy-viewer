@@ -781,30 +781,33 @@ textarea {
 }
 
 .kol-table-wrap {
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #cfd6df;
+  border-radius: 4px;
   overflow: auto;
 }
 
 .kol-table {
-  border-collapse: separate;
-  border-spacing: 0;
+  border-collapse: collapse;
+  font-family: var(--mono);
   min-width: 1500px;
   width: 100%;
 }
 
 .kol-table th,
 .kol-table td {
-  border-bottom: 1px solid var(--line);
-  border-right: 1px solid var(--line);
-  padding: 8px;
+  border: 1px solid #d9dee7;
+  font-size: 12px;
+  line-height: 1.45;
+  max-width: 320px;
+  padding: 5px 7px;
   text-align: left;
-  vertical-align: top;
+  vertical-align: middle;
 }
 
 .kol-table th {
-  background: var(--soft);
-  color: var(--muted);
+  background: #eef2f7;
+  color: #344054;
   font-size: 12px;
   font-weight: 700;
   position: sticky;
@@ -813,13 +816,24 @@ textarea {
 }
 
 .kol-table tr:last-child td {
-  border-bottom: 0;
+  border-bottom: 1px solid #d9dee7;
+}
+
+.kol-table tbody tr:nth-child(even) td {
+  background: #fbfcfe;
+}
+
+.kol-table tbody tr:hover td {
+  background: #eef4ff;
 }
 
 .kol-table a {
-  color: var(--accent);
-  font-weight: 700;
+  color: #175cd3;
   text-decoration: none;
+}
+
+.kol-table a:hover {
+  text-decoration: underline;
 }
 
 .number-cell {
