@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>easy-viewer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260630-kol-mysql-table" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260706-dashboard-page-renames" />
   </head>
   <body>
     <main class="page">
@@ -22,10 +22,10 @@
         <label>
           <span>页面</span>
           <select id="pageSelect">
-            <option value="posts">每日社区帖子</option>
+            <option value="posts">小牛书社区内容生产</option>
             <option value="rerun">重跑帖子阅读数</option>
-            <option value="settlements">大V商单结算</option>
-            <option value="kolMetrics">每日 KOL 指标</option>
+            <option value="settlements">社区大V业务看板</option>
+            <option value="kolMetrics">大V账号数据统计</option>
           </select>
         </label>
       </section>
@@ -105,37 +105,106 @@
       </section>
 
       <section id="settlementsView" class="app-view" data-view="settlements" hidden>
-        <section class="settlement-panel" aria-label="大V商单结算">
+        <section class="settlement-panel" aria-label="社区大V业务看板">
           <div class="section-head settlement-head">
             <div>
-              <h2>大V商单结算</h2>
-              <p id="settlementSourceLine">按链接补全标题、阅读量、评论、点赞、截图和粉丝数</p>
+              <h2>社区大V业务看板</h2>
+              <p id="settlementSourceLine" hidden>按 IP 名称补全粉丝数</p>
             </div>
             <div class="settlement-actions">
               <button id="refreshSettlementButton" type="button">刷新</button>
+              <button id="downloadSettlementTemplateButton" class="secondary" type="button">下载模板</button>
               <button id="importSettlementButton" class="secondary" type="button">导入</button>
               <input id="importSettlementFileInput" type="file" accept=".xlsx,.csv,.tsv,.txt" hidden />
-              <button id="autofillAllSettlementButton" class="secondary" type="button">补全全部</button>
-              <button id="exportSettlementButton" class="secondary" type="button">导出 CSV</button>
+              <button id="fillFansSettlementButton" class="secondary" type="button">补全粉丝数</button>
+              <button id="toggleSettlementChartsButton" class="secondary" type="button">图表展示</button>
+              <button id="exportSettlementExcelButton" class="secondary" type="button">导出 Excel</button>
             </div>
           </div>
 
-          <section class="summary settlement-summary" id="settlementSummary"></section>
+          <section class="summary settlement-summary" id="settlementSummary" hidden></section>
+          <section class="settlement-stats" id="settlementStats" aria-label="结算统计" hidden></section>
+
+          <section class="settlement-dimensions" aria-label="结算维度筛选">
+            <label>
+              <span>展示</span>
+              <select id="settlementViewModeSelect">
+                <option value="all">全部</option>
+                <option value="customer">客户</option>
+              </select>
+            </label>
+            <label>
+              <span>起始日期</span>
+              <input id="settlementStartDateInput" type="date" />
+            </label>
+            <label>
+              <span>结束日期</span>
+              <input id="settlementEndDateInput" type="date" />
+            </label>
+            <label>
+              <span>合作方</span>
+              <select id="settlementPartnerSelect">
+                <option value="">全部合作方</option>
+              </select>
+            </label>
+            <label>
+              <span>投放平台</span>
+              <select id="settlementDeliveryPlatformSelect">
+                <option value="">全部投放平台</option>
+              </select>
+            </label>
+            <label>
+              <span>IP名称</span>
+              <select id="settlementIpNameSelect">
+                <option value="">全部 IP</option>
+              </select>
+            </label>
+            <label>
+              <span>空值筛选</span>
+              <select id="settlementMissingSelect">
+                <option value="">全部</option>
+              </select>
+            </label>
+            <label>
+              <span>排序</span>
+              <select id="settlementSortSelect">
+                <option value="date_desc">日期最新</option>
+              </select>
+            </label>
+          </section>
+
+          <section class="settlement-charts" id="settlementCharts" aria-label="费用图表" hidden>
+            <div class="settlement-chart-grid">
+              <article class="settlement-chart-card">
+                <h3>按日期汇总费用</h3>
+                <div id="settlementDateChart" class="settlement-chart-body"></div>
+              </article>
+              <article class="settlement-chart-card">
+                <h3>内外营收占比</h3>
+                <div id="settlementTypeChart" class="settlement-chart-body settlement-pie-wrap"></div>
+              </article>
+              <article class="settlement-chart-card settlement-chart-wide">
+                <h3>各家营收情况</h3>
+                <div id="settlementPartnerChart" class="settlement-chart-body"></div>
+              </article>
+            </div>
+          </section>
 
           <div class="settlement-table-wrap">
-            <table class="settlement-table" aria-label="大V商单结算表">
+            <table class="settlement-table" aria-label="社区大V业务看板表">
               <thead>
                 <tr>
                   <th>#</th>
                   <th>日期</th>
                   <th>合作方</th>
+                  <th>投放平台</th>
                   <th>产品</th>
                   <th>IP名称</th>
                   <th>粉丝数</th>
                   <th>文章类型</th>
                   <th>费用</th>
-                  <th>创作者费用</th>
-                  <th>大V类型</th>
+                  <th data-settlement-field="creatorFee">创作者费用</th>
+                  <th data-settlement-field="kolType">大V类型</th>
                   <th>买入金额</th>
                   <th>链接</th>
                   <th>文章标题</th>
@@ -143,23 +212,23 @@
                   <th>阅读量</th>
                   <th>评论</th>
                   <th>点赞</th>
-                  <th>打款进度-合作方</th>
-                  <th>结算进度-创作者</th>
+                  <th data-settlement-field="partnerPaymentStatus">打款进度-合作方</th>
+                  <th data-settlement-field="creatorSettlementStatus">结算进度-创作者</th>
                   <th>备注</th>
-                  <th>操作</th>
                 </tr>
               </thead>
               <tbody id="settlementTableBody"></tbody>
+              <tfoot id="settlementTableFoot"></tfoot>
             </table>
           </div>
         </section>
       </section>
 
       <section id="kolMetricsView" class="app-view" data-view="kolMetrics" hidden>
-        <section class="kol-panel" aria-label="每日 KOL 指标">
+        <section class="kol-panel" aria-label="大V账号数据统计">
           <div class="section-head kol-head">
             <div>
-              <h2>每日 KOL 指标</h2>
+              <h2>大V账号数据统计</h2>
               <p id="kolMetricsSourceLine">crawler_app.kol_daily_metrics / kol_base_profiles</p>
             </div>
             <div class="kol-actions">
@@ -203,7 +272,7 @@
           <section class="summary kol-summary" id="kolMetricsSummary"></section>
 
           <div class="kol-table-wrap">
-            <table class="kol-table" aria-label="每日 KOL 指标表">
+            <table class="kol-table" aria-label="大V账号数据统计表">
               <thead id="kolMetricsTableHead"></thead>
               <tbody id="kolMetricsTableBody"></tbody>
             </table>
@@ -225,9 +294,9 @@
         if (refreshButton) refreshButton.hidden = activeView !== "posts";
       })();
     </script>
-    <script src="/static/app.js?v=20260630-kol-mysql-table"></script>
-    <script src="/static/rerun.js?v=20260630-kol-mysql-table"></script>
-    <script src="/static/settlements.js?v=20260630-kol-mysql-table"></script>
-    <script src="/static/kol_metrics.js?v=20260630-kol-mysql-table"></script>
+    <script src="/static/app.js?v=20260706-dashboard-page-renames"></script>
+    <script src="/static/rerun.js?v=20260706-dashboard-page-renames"></script>
+    <script src="/static/settlements.js?v=20260707-settlement-missing-metrics"></script>
+    <script src="/static/kol_metrics.js?v=20260706-dashboard-page-renames"></script>
   </body>
 </html>

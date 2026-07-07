@@ -6,15 +6,21 @@ import csv
 import io
 import os
 import re
+import socket
 import zipfile
 from pathlib import Path
 from typing import Any
 from datetime import date, datetime, timedelta
 from xml.etree import ElementTree as ET
+from urllib.parse import urlparse, urlunparse
+from urllib.request import Request as UrlRequest, urlopen
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request as FastAPIRequest, UploadFile
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 
 POST_TABLE = "t_fund_generated_posts"
@@ -48,6 +54,28 @@ KOL_MISSING_OPTIONS = {
 
 def _viewer_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _capture_root() -> Path | None:
+    configured = os.environ.get("EASY_VIEWER_CAPTURE_ROOT", "").strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.extend(Path(item.strip()) for item in configured.split(os.pathsep) if item.strip())
+    root = _viewer_root()
+    candidates.extend(
+        [
+            root / "captures",
+            root.parent / "adb" / "apps" / "finance_crawler" / "captures",
+            root.parent / "adb" / "runtime" / "captures",
+        ]
+    )
+    for path in candidates:
+        try:
+            if path.exists() and path.is_dir():
+                return path
+        except OSError:
+            continue
+    return None
 
 
 def _load_env_file(path: Path) -> None:
@@ -133,6 +161,90 @@ def _first_present(*values: Any) -> Any:
         if value not in (None, ""):
             return value
     return ""
+
+
+LOCAL_URL_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+
+
+def _netloc_hostname(netloc: str) -> str:
+    return (urlparse(f"//{netloc}").hostname or "").lower()
+
+
+def _netloc_port(netloc: str) -> str:
+    port = urlparse(f"//{netloc}").port
+    return f":{port}" if port else ""
+
+
+def _configured_public_base(default_scheme: str) -> tuple[str, str] | None:
+    public_url = os.environ.get("EASY_VIEWER_PUBLIC_BASE_URL", "").strip()
+    if public_url:
+        parsed = urlparse(public_url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return parsed.scheme, parsed.netloc
+    public_host = os.environ.get("EASY_VIEWER_PUBLIC_HOST", "").strip()
+    if public_host:
+        return default_scheme, public_host
+    return None
+
+
+def _is_lan_ip(value: str) -> bool:
+    if not value or value.startswith("127.") or value.startswith("169.254."):
+        return False
+    return value.startswith("10.") or value.startswith("192.168.") or re.fullmatch(r"172\.(1[6-9]|2\d|3[0-1])\..+", value) is not None
+
+
+def _detect_lan_ip() -> str:
+    candidates: list[str] = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            candidates.append(sock.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        candidates.extend(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    for candidate in candidates:
+        if _is_lan_ip(candidate):
+            return candidate
+    return ""
+
+
+def _request_public_base(request: FastAPIRequest | None) -> tuple[str, str] | None:
+    if request is None:
+        return None
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    if not host:
+        return None
+    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme or "http"
+    scheme = scheme.split(",", 1)[0].strip()
+    host = host.split(",", 1)[0].strip()
+    configured = _configured_public_base(scheme)
+    if configured:
+        return configured
+    if _netloc_hostname(host) in LOCAL_URL_HOSTS:
+        lan_ip = _detect_lan_ip()
+        if lan_ip:
+            return scheme, f"{lan_ip}{_netloc_port(host)}"
+    return scheme, host
+
+
+def _externalize_local_url(value: Any, request: FastAPIRequest | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"}:
+        return text
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in LOCAL_URL_HOSTS:
+        return text
+    public_base = _request_public_base(request)
+    if public_base is None:
+        return text
+    scheme, host = public_base
+    return urlunparse(parsed._replace(scheme=scheme, netloc=host))
 
 
 def _deep_find_value(value: Any, keys: set[str]) -> Any:
@@ -488,7 +600,7 @@ def _rerun_post_tasks_payload(urls_value: Any) -> dict[str, Any]:
     }
 
 
-def _settlement_autofill_payload(post_url: str) -> dict[str, Any]:
+def _settlement_autofill_payload(post_url: str, request: FastAPIRequest | None = None) -> dict[str, Any]:
     post_url = post_url.strip()
     if not post_url:
         raise ValueError("请输入帖子链接")
@@ -599,7 +711,7 @@ def _settlement_autofill_payload(post_url: str) -> dict[str, Any]:
     payload["ipName"] = ip_name
     payload["fansCount"] = str(_first_present(snapshot_row.get("fans_count"), metric_row.get("fans_count"), _deep_find_value(task_metrics, {"fans_count", "fansCount"}), _deep_find_value(task_result, {"fans_count", "fansCount"})) or "")
     payload["articleTitle"] = str(_first_present(detail_row.get("article_title"), _deep_find_value(detail_metrics, {"article_title", "articleTitle", "title"}), _deep_find_value(task_metrics, {"article_title", "articleTitle", "title"}), _deep_find_value(task_result, {"article_title", "articleTitle", "title"})) or "")
-    payload["screenshot"] = str(_first_present(detail_row.get("screenshot_path"), task_row.get("screenshot_path"), _deep_find_value(detail_metrics, {"screenshot", "screenshot_path", "screenshotPath"}), _deep_find_value(task_result, {"screenshot", "screenshot_path", "screenshotPath"})) or "")
+    payload["screenshot"] = _externalize_local_url(_first_present(detail_row.get("screenshot_path"), task_row.get("screenshot_path"), _deep_find_value(detail_metrics, {"screenshot", "screenshot_path", "screenshotPath"}), _deep_find_value(task_result, {"screenshot", "screenshot_path", "screenshotPath"})), request)
     payload["readCount"] = str(_first_present(detail_row.get("read_count"), _deep_find_value(detail_metrics, {"read_count", "readCount", "reads"}), _deep_find_value(task_metrics, {"read_count", "readCount", "reads"}), _deep_find_value(task_result, {"read_count", "readCount", "reads"})) or "")
     payload["commentCount"] = str(_first_present(detail_row.get("comment_count"), _deep_find_value(detail_metrics, {"comment_count", "commentCount", "comments"}), _deep_find_value(task_metrics, {"comment_count", "commentCount", "comments"}), _deep_find_value(task_result, {"comment_count", "commentCount", "comments"})) or "")
     payload["likeCount"] = str(_first_present(detail_row.get("like_count"), _deep_find_value(detail_metrics, {"like_count", "likeCount", "likes"}), _deep_find_value(task_metrics, {"like_count", "likeCount", "likes"}), _deep_find_value(task_result, {"like_count", "likeCount", "likes"})) or "")
@@ -620,6 +732,7 @@ def _settlement_autofill_payload(post_url: str) -> dict[str, Any]:
 SETTLEMENT_IMPORT_FIELDS = [
     "date",
     "partner",
+    "deliveryPlatform",
     "product",
     "ipName",
     "fansCount",
@@ -639,9 +752,36 @@ SETTLEMENT_IMPORT_FIELDS = [
     "notes",
 ]
 
+SETTLEMENT_EXPORT_LABELS = {
+    "date": "日期",
+    "partner": "合作方",
+    "deliveryPlatform": "投放平台",
+    "product": "产品",
+    "ipName": "IP名称",
+    "fansCount": "粉丝数",
+    "articleType": "文章类型",
+    "fee": "费用",
+    "creatorFee": "创作者费用",
+    "kolType": "大V类型",
+    "buyAmount": "买入金额",
+    "link": "链接",
+    "articleTitle": "文章标题",
+    "screenshot": "截图",
+    "readCount": "阅读量",
+    "commentCount": "评论",
+    "likeCount": "点赞",
+    "partnerPaymentStatus": "打款进度-合作方",
+    "creatorSettlementStatus": "结算进度-创作者",
+    "notes": "备注",
+}
+
+SETTLEMENT_EXPORT_NUMERIC_FIELDS = {"fansCount", "fee", "creatorFee", "buyAmount", "readCount", "commentCount", "likeCount"}
+SETTLEMENT_EXPORT_MONEY_FIELDS = {"fee", "creatorFee", "buyAmount"}
+
 SETTLEMENT_DB_COLUMNS = [
     "settlement_date",
     "partner",
+    "delivery_platform",
     "product_name",
     "ip_name",
     "fans_count",
@@ -662,6 +802,7 @@ SETTLEMENT_DB_COLUMNS = [
     "notes",
     "source_payload_json",
 ]
+SETTLEMENT_NUMERIC_DB_COLUMNS = {"fans_count", "fee", "creator_fee", "buy_amount", "read_count", "comment_count", "like_count"}
 
 
 def _ensure_settlement_table(connection: Any) -> None:
@@ -672,6 +813,7 @@ def _ensure_settlement_table(connection: Any) -> None:
               id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
               settlement_date DATE NOT NULL,
               partner VARCHAR(255) NOT NULL DEFAULT '',
+              delivery_platform VARCHAR(255) NOT NULL DEFAULT '',
               product_name VARCHAR(255) NOT NULL DEFAULT '',
               ip_name VARCHAR(255) NOT NULL DEFAULT '',
               fans_count BIGINT NULL,
@@ -694,21 +836,80 @@ def _ensure_settlement_table(connection: Any) -> None:
               created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
               updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
               PRIMARY KEY (id),
-              UNIQUE KEY uq_settlement_date_url (settlement_date, post_url_hash),
+              UNIQUE KEY uq_settlement_identity (settlement_date, ip_name, product_name, article_type),
               KEY idx_settlement_date (settlement_date),
               KEY idx_ip_name (ip_name),
+              KEY idx_delivery_platform (delivery_platform),
+              KEY idx_settlement_post_url_hash (post_url_hash),
               KEY idx_partner (partner)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
+        cursor.execute(f"SHOW COLUMNS FROM {SETTLEMENT_TABLE} LIKE 'delivery_platform'")
+        if not cursor.fetchone():
+            cursor.execute(
+                f"""
+                ALTER TABLE {SETTLEMENT_TABLE}
+                ADD COLUMN delivery_platform VARCHAR(255) NOT NULL DEFAULT '' AFTER partner
+                """
+            )
+        cursor.execute(f"SHOW INDEX FROM {SETTLEMENT_TABLE} WHERE Key_name = 'idx_delivery_platform'")
+        if not cursor.fetchone():
+            cursor.execute(f"ALTER TABLE {SETTLEMENT_TABLE} ADD KEY idx_delivery_platform (delivery_platform)")
+        cursor.execute(f"SHOW INDEX FROM {SETTLEMENT_TABLE} WHERE Key_name = 'uq_settlement_identity'")
+        if not cursor.fetchone():
+            cursor.execute(
+                f"""
+                ALTER TABLE {SETTLEMENT_TABLE}
+                ADD UNIQUE KEY uq_settlement_identity (settlement_date, ip_name, product_name, article_type)
+                """
+            )
+        cursor.execute(f"SHOW INDEX FROM {SETTLEMENT_TABLE} WHERE Key_name = 'idx_settlement_post_url_hash'")
+        if not cursor.fetchone():
+            cursor.execute(f"ALTER TABLE {SETTLEMENT_TABLE} ADD KEY idx_settlement_post_url_hash (post_url_hash)")
+        cursor.execute(f"SHOW INDEX FROM {SETTLEMENT_TABLE} WHERE Key_name = 'uq_settlement_date_url'")
+        if cursor.fetchone():
+            cursor.execute(f"ALTER TABLE {SETTLEMENT_TABLE} DROP INDEX uq_settlement_date_url")
 
 
 def _settlement_url_hash(post_url: str) -> str:
     return hashlib.sha256(post_url.strip().encode("utf-8")).hexdigest()
 
 
+def _settlement_import_update_sql(columns: list[str]) -> str:
+    assignments: list[str] = []
+    for column in columns:
+        if column in SETTLEMENT_NUMERIC_DB_COLUMNS:
+            assignments.append(f"{column} = COALESCE(VALUES({column}), {column})")
+        else:
+            assignments.append(f"{column} = CASE WHEN VALUES({column}) IS NULL OR VALUES({column}) = '' THEN {column} ELSE VALUES({column}) END")
+    return ", ".join(assignments)
+
+
 def _clean_text(value: Any) -> str:
-    return str(value or "").strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _first_non_empty_value(*values: Any) -> Any:
+    for value in values:
+        if value is not None and _clean_text(value) != "":
+            return value
+    return None
+
+
+def _is_zero_placeholder(value: Any) -> bool:
+    return re.fullmatch(r"0+(?:\.0+)?", _clean_text(value)) is not None
+
+
+def _settlement_identity_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        _date_text(row.get("settlement_date")),
+        _clean_text(row.get("ip_name")),
+        _clean_text(row.get("product_name")),
+        _clean_text(row.get("article_type")),
+    )
 
 
 def _clean_date(value: Any) -> str:
@@ -759,6 +960,7 @@ def _settlement_field_from_header(header: Any) -> str:
     checks = [
         ("日期", "date"),
         ("合作方", "partner"),
+        ("投放平台", "deliveryPlatform"),
         ("产品", "product"),
         ("IP名称", "ipName"),
         ("粉丝数", "fansCount"),
@@ -888,11 +1090,12 @@ def _parse_settlement_import_file(content: bytes, filename: str) -> list[dict[st
     raise ValueError("仅支持 .xlsx / .csv / .tsv / .txt 文件")
 
 
-def _settlement_api_row(row: dict[str, Any]) -> dict[str, Any]:
+def _settlement_api_row(row: dict[str, Any], request: FastAPIRequest | None = None) -> dict[str, Any]:
     return {
         "id": str(row.get("id") or ""),
         "date": _date_text(row.get("settlement_date")),
         "partner": str(row.get("partner") or ""),
+        "deliveryPlatform": str(row.get("delivery_platform") or ""),
         "product": str(row.get("product_name") or ""),
         "ipName": str(row.get("ip_name") or ""),
         "fansCount": "" if row.get("fans_count") is None else str(row.get("fans_count")),
@@ -903,7 +1106,7 @@ def _settlement_api_row(row: dict[str, Any]) -> dict[str, Any]:
         "buyAmount": "" if row.get("buy_amount") is None else str(row.get("buy_amount")),
         "link": str(row.get("post_url") or ""),
         "articleTitle": str(row.get("article_title") or ""),
-        "screenshot": str(row.get("screenshot_url") or ""),
+        "screenshot": _externalize_local_url(row.get("screenshot_url"), request),
         "readCount": "" if row.get("read_count") is None else str(row.get("read_count")),
         "commentCount": "" if row.get("comment_count") is None else str(row.get("comment_count")),
         "likeCount": "" if row.get("like_count") is None else str(row.get("like_count")),
@@ -914,37 +1117,50 @@ def _settlement_api_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_settlement_row(raw: dict[str, Any]) -> dict[str, Any]:
-    post_url = _clean_text(raw.get("link") or raw.get("post_url") or raw.get("链接"))
+    post_url = _clean_text(_first_non_empty_value(raw.get("link"), raw.get("post_url"), raw.get("链接")))
     if not post_url:
         raise ValueError("导入行缺少链接")
-    settlement_date = _clean_date(raw.get("date") or raw.get("settlement_date") or raw.get("日期"))
+    settlement_date = _clean_date(_first_non_empty_value(raw.get("date"), raw.get("settlement_date"), raw.get("日期")))
     normalized = {
         "settlement_date": settlement_date,
-        "partner": _clean_text(raw.get("partner") or raw.get("合作方")),
-        "product_name": _clean_text(raw.get("product") or raw.get("product_name") or raw.get("产品")),
-        "ip_name": _clean_text(raw.get("ipName") or raw.get("ip_name") or raw.get("IP名称")),
-        "fans_count": _clean_int(raw.get("fansCount") or raw.get("fans_count") or raw.get("粉丝数")),
-        "article_type": _clean_text(raw.get("articleType") or raw.get("article_type") or raw.get("文章类型")),
-        "fee": _clean_decimal(raw.get("fee") or raw.get("费用")),
-        "creator_fee": _clean_decimal(raw.get("creatorFee") or raw.get("creator_fee") or raw.get("创作者费用")),
-        "kol_type": _clean_text(raw.get("kolType") or raw.get("kol_type") or raw.get("大V类型")),
-        "buy_amount": _clean_decimal(raw.get("buyAmount") or raw.get("buy_amount") or raw.get("买入金额")),
+        "partner": _clean_text(_first_non_empty_value(raw.get("partner"), raw.get("合作方"))),
+        "delivery_platform": _clean_text(_first_non_empty_value(raw.get("deliveryPlatform"), raw.get("delivery_platform"), raw.get("投放平台"))),
+        "product_name": _clean_text(_first_non_empty_value(raw.get("product"), raw.get("product_name"), raw.get("产品"))),
+        "ip_name": _clean_text(_first_non_empty_value(raw.get("ipName"), raw.get("ip_name"), raw.get("IP名称"))),
+        "fans_count": _clean_int(_first_non_empty_value(raw.get("fansCount"), raw.get("fans_count"), raw.get("粉丝数"))),
+        "article_type": _clean_text(_first_non_empty_value(raw.get("articleType"), raw.get("article_type"), raw.get("文章类型"))),
+        "fee": _clean_decimal(_first_non_empty_value(raw.get("fee"), raw.get("费用"))),
+        "creator_fee": _clean_decimal(_first_non_empty_value(raw.get("creatorFee"), raw.get("creator_fee"), raw.get("创作者费用"))),
+        "kol_type": _clean_text(_first_non_empty_value(raw.get("kolType"), raw.get("kol_type"), raw.get("大V类型"))),
+        "buy_amount": _clean_decimal(_first_non_empty_value(raw.get("buyAmount"), raw.get("buy_amount"), raw.get("买入金额"))),
         "post_url": post_url,
         "post_url_hash": _settlement_url_hash(post_url),
-        "article_title": _clean_text(raw.get("articleTitle") or raw.get("article_title") or raw.get("文章标题")),
-        "screenshot_url": _clean_text(raw.get("screenshot") or raw.get("screenshot_url") or raw.get("截图")),
-        "read_count": _clean_int(raw.get("readCount") or raw.get("read_count") or raw.get("阅读量")),
-        "comment_count": _clean_int(raw.get("commentCount") or raw.get("comment_count") or raw.get("评论")),
-        "like_count": _clean_int(raw.get("likeCount") or raw.get("like_count") or raw.get("点赞")),
-        "partner_payment_status": _clean_text(raw.get("partnerPaymentStatus") or raw.get("partner_payment_status") or raw.get("打款进度-合作方")),
-        "creator_settlement_status": _clean_text(raw.get("creatorSettlementStatus") or raw.get("creator_settlement_status") or raw.get("结算进度-创作者")),
-        "notes": _clean_text(raw.get("notes") or raw.get("备注")),
+        "article_title": _clean_text(_first_non_empty_value(raw.get("articleTitle"), raw.get("article_title"), raw.get("文章标题"))),
+        "screenshot_url": _clean_text(_first_non_empty_value(raw.get("screenshot"), raw.get("screenshot_url"), raw.get("截图"))),
+        "read_count": _clean_int(_first_non_empty_value(raw.get("readCount"), raw.get("read_count"), raw.get("阅读量"))),
+        "comment_count": _clean_int(_first_non_empty_value(raw.get("commentCount"), raw.get("comment_count"), raw.get("评论"))),
+        "like_count": _clean_int(_first_non_empty_value(raw.get("likeCount"), raw.get("like_count"), raw.get("点赞"))),
+        "partner_payment_status": _clean_text(_first_non_empty_value(raw.get("partnerPaymentStatus"), raw.get("partner_payment_status"), raw.get("打款进度-合作方"))),
+        "creator_settlement_status": _clean_text(_first_non_empty_value(raw.get("creatorSettlementStatus"), raw.get("creator_settlement_status"), raw.get("结算进度-创作者"))),
+        "notes": _clean_text(_first_non_empty_value(raw.get("notes"), raw.get("备注"))),
         "source_payload_json": json.dumps(raw, ensure_ascii=False, default=str),
     }
+    if normalized["fans_count"] is not None and normalized["fans_count"] <= 0:
+        normalized["fans_count"] = None
+    for text_column in ("article_title", "screenshot_url"):
+        if _is_zero_placeholder(normalized[text_column]):
+            normalized[text_column] = ""
+    missing_identity_fields = [
+        label
+        for label, column in (("产品", "product_name"), ("IP名称", "ip_name"), ("文章类型", "article_type"))
+        if not normalized[column]
+    ]
+    if missing_identity_fields:
+        raise ValueError("导入行缺少唯一键字段：" + "、".join(missing_identity_fields))
     return normalized
 
 
-def _settlements_payload(limit: int = 500) -> list[dict[str, Any]]:
+def _settlements_payload(limit: int = 500, request: FastAPIRequest | None = None) -> list[dict[str, Any]]:
     with _connect() as connection:
         _ensure_settlement_table(connection)
         with connection.cursor() as cursor:
@@ -958,20 +1174,20 @@ def _settlements_payload(limit: int = 500) -> list[dict[str, Any]]:
                 (int(limit),),
             )
             rows = cursor.fetchall()
-    return [_settlement_api_row(row) for row in rows]
+    return [_settlement_api_row(row, request) for row in rows]
 
 
-def _import_settlements_payload(rows_value: Any) -> dict[str, Any]:
+def _import_settlements_payload(rows_value: Any, request: FastAPIRequest | None = None) -> dict[str, Any]:
     if not isinstance(rows_value, list) or not rows_value:
         raise ValueError("没有可导入的数据")
 
     normalized_rows: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for index, raw in enumerate(rows_value, start=1):
         try:
             row = _normalize_settlement_row(raw if isinstance(raw, dict) else {})
-            key = (row["settlement_date"], row["post_url_hash"])
+            key = _settlement_identity_key(row)
             if key in seen:
                 continue
             seen.add(key)
@@ -984,26 +1200,26 @@ def _import_settlements_payload(rows_value: Any) -> dict[str, Any]:
 
     with _connect() as connection:
         _ensure_settlement_table(connection)
-        existing_keys: set[tuple[str, str]] = set()
-        key_placeholders = ", ".join(["(%s, %s)"] * len(normalized_rows))
+        existing_keys: set[tuple[str, str, str, str]] = set()
+        key_placeholders = ", ".join(["(%s, %s, %s, %s)"] * len(normalized_rows))
         key_params: list[Any] = []
         for row in normalized_rows:
-            key_params.extend([row["settlement_date"], row["post_url_hash"]])
+            key_params.extend(_settlement_identity_key(row))
         with connection.cursor() as cursor:
             cursor.execute(
                 f"""
-                SELECT settlement_date, post_url_hash
+                SELECT settlement_date, ip_name, product_name, article_type
                 FROM {SETTLEMENT_TABLE}
-                WHERE (settlement_date, post_url_hash) IN ({key_placeholders})
+                WHERE (settlement_date, ip_name, product_name, article_type) IN ({key_placeholders})
                 """,
                 tuple(key_params),
             )
             for row in cursor.fetchall():
-                existing_keys.add((_date_text(row.get("settlement_date")), str(row.get("post_url_hash") or "")))
+                existing_keys.add(_settlement_identity_key(row))
 
         placeholders = ", ".join(["%s"] * len(SETTLEMENT_DB_COLUMNS))
-        update_columns = [column for column in SETTLEMENT_DB_COLUMNS if column not in {"settlement_date", "post_url_hash"}]
-        update_sql = ", ".join([f"{column} = VALUES({column})" for column in update_columns])
+        update_columns = [column for column in SETTLEMENT_DB_COLUMNS if column not in {"settlement_date", "ip_name", "product_name", "article_type"}]
+        update_sql = _settlement_import_update_sql(update_columns)
         with connection.cursor() as cursor:
             for row in normalized_rows:
                 cursor.execute(
@@ -1016,7 +1232,7 @@ def _import_settlements_payload(rows_value: Any) -> dict[str, Any]:
                 )
         connection.commit()
 
-    inserted_count = sum((row["settlement_date"], row["post_url_hash"]) not in existing_keys for row in normalized_rows)
+    inserted_count = sum(_settlement_identity_key(row) not in existing_keys for row in normalized_rows)
     updated_count = len(normalized_rows) - inserted_count
     return {
         "received_count": len(rows_value),
@@ -1025,8 +1241,289 @@ def _import_settlements_payload(rows_value: Any) -> dict[str, Any]:
         "updated_count": updated_count,
         "error_count": len(errors),
         "errors": errors[:50],
-        "rows": _settlements_payload(),
+        "rows": _settlements_payload(request=request),
     }
+
+
+def _fill_settlement_fans_count_payload(ids_value: Any, request: FastAPIRequest | None = None) -> dict[str, Any]:
+    if not isinstance(ids_value, list) or not ids_value:
+        raise ValueError("请选择需要补全粉丝数的记录")
+
+    row_ids: list[int] = []
+    seen: set[int] = set()
+    for value in ids_value:
+        row_id = _parse_int(value)
+        if row_id is None or row_id <= 0 or row_id in seen:
+            continue
+        seen.add(row_id)
+        row_ids.append(row_id)
+    if not row_ids:
+        raise ValueError("没有有效的记录 ID")
+
+    placeholders = ", ".join(["%s"] * len(row_ids))
+    metrics_source_sql = f"""
+        SELECT
+          metric_date,
+          TRIM(platform) COLLATE utf8mb4_unicode_ci AS platform_key,
+          TRIM(kol_name) COLLATE utf8mb4_unicode_ci AS kol_name_key,
+          MAX(fans_count) AS fans_count
+        FROM {KOL_DAILY_METRICS_TABLE}
+        WHERE fans_count IS NOT NULL
+        GROUP BY metric_date, TRIM(platform) COLLATE utf8mb4_unicode_ci, TRIM(kol_name) COLLATE utf8mb4_unicode_ci
+    """
+    with _connect() as connection:
+        _ensure_settlement_table(connection)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                  s.id,
+                  s.settlement_date,
+                  s.delivery_platform,
+                  s.ip_name,
+                  m.fans_count AS source_fans_count
+                FROM {SETTLEMENT_TABLE} AS s
+                LEFT JOIN ({metrics_source_sql}) AS m
+                  ON m.metric_date = s.settlement_date
+                 AND m.platform_key = TRIM(s.delivery_platform) COLLATE utf8mb4_unicode_ci
+                 AND m.kol_name_key = TRIM(s.ip_name) COLLATE utf8mb4_unicode_ci
+                WHERE s.id IN ({placeholders})
+                """,
+                tuple(row_ids),
+            )
+            target_rows = cursor.fetchall()
+
+            matched_ids = [_parse_int(row.get("id")) for row in target_rows if row.get("source_fans_count") is not None]
+            unmatched_ids = [_parse_int(row.get("id")) for row in target_rows if row.get("source_fans_count") is None]
+            matched_ids = [row_id for row_id in matched_ids if row_id is not None]
+            unmatched_ids = [row_id for row_id in unmatched_ids if row_id is not None]
+
+            cursor.execute(
+                f"""
+                UPDATE {SETTLEMENT_TABLE} AS s
+                JOIN ({metrics_source_sql}) AS m
+                  ON m.metric_date = s.settlement_date
+                 AND m.platform_key = TRIM(s.delivery_platform) COLLATE utf8mb4_unicode_ci
+                 AND m.kol_name_key = TRIM(s.ip_name) COLLATE utf8mb4_unicode_ci
+                SET s.fans_count = m.fans_count
+                WHERE s.id IN ({placeholders})
+                """,
+                tuple(row_ids),
+            )
+            updated_count = cursor.rowcount
+            connection.commit()
+
+    return {
+        "requested_count": len(row_ids),
+        "target_count": len(target_rows),
+        "matched_count": len(matched_ids),
+        "updated_count": updated_count,
+        "unmatched_count": len(unmatched_ids),
+        "unmatched_ids": unmatched_ids[:50],
+        "rows": _settlements_payload(request=request),
+    }
+
+
+def _settlement_export_number(value: Any) -> float:
+    text = _clean_text(value).replace(",", "")
+    if not text:
+        return 0.0
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    return float(match.group(0)) if match else 0.0
+
+
+def _settlement_export_stat_value(field: str, rows: list[dict[str, Any]]) -> str:
+    value = sum(_settlement_export_number(row.get(field)) for row in rows)
+    if field in SETTLEMENT_EXPORT_MONEY_FIELDS:
+        return f"{value:.2f}"
+    return str(int(round(value)))
+
+
+def _settlement_export_stats_row(fields: list[str], rows: list[dict[str, Any]]) -> list[Any]:
+    values: list[Any] = []
+    for index, field in enumerate(fields):
+        if index == 0:
+            values.append("SUM")
+        elif field in SETTLEMENT_EXPORT_NUMERIC_FIELDS:
+            values.append(_settlement_export_stat_value(field, rows))
+        else:
+            values.append("")
+    return values
+
+
+def _settlements_template_xlsx() -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "社区大V业务看板模板"
+    fields = SETTLEMENT_IMPORT_FIELDS
+
+    worksheet.append([SETTLEMENT_EXPORT_LABELS.get(field, field) for field in fields])
+    sample_row = {
+        "date": date.today().strftime("%Y-%m-%d"),
+        "partner": "示例合作方",
+        "deliveryPlatform": "理财通",
+        "product": "示例产品",
+        "ipName": "示例IP",
+        "fansCount": "",
+        "articleType": "加仓贴",
+        "fee": "1000",
+        "creatorFee": "500",
+        "kolType": "外部",
+        "buyAmount": "5000",
+        "link": "https://example.com/post/unique-url",
+        "articleTitle": "示例文章标题",
+        "screenshot": "http://192.168.1.30:8898/captures/example/page_000.png",
+        "readCount": "",
+        "commentCount": "",
+        "likeCount": "",
+        "partnerPaymentStatus": "未打款",
+        "creatorSettlementStatus": "未结算",
+        "notes": "日期 + IP名称 + 产品 + 文章类型用于去重，重复导入会更新同一条记录",
+    }
+    worksheet.append([sample_row.get(field, "") for field in fields])
+
+    header_fill = PatternFill("solid", fgColor="EEF2F7")
+    header_font = Font(bold=True, color="344054")
+    for cell in worksheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for row_cells in worksheet.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    for column_index, field in enumerate(fields, start=1):
+        column_letter = get_column_letter(column_index)
+        if field in {"link", "screenshot", "articleTitle", "notes", "product"}:
+            worksheet.column_dimensions[column_letter].width = 38
+        elif field in SETTLEMENT_EXPORT_NUMERIC_FIELDS:
+            worksheet.column_dimensions[column_letter].width = 14
+        else:
+            worksheet.column_dimensions[column_letter].width = 18
+
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def _read_export_image_bytes(reference: str) -> bytes | None:
+    reference = _clean_text(reference)
+    if not reference:
+        return None
+    parsed = urlparse(reference)
+    try:
+        if parsed.scheme in {"http", "https"}:
+            url_request = UrlRequest(reference, headers={"User-Agent": "easy-viewer/1.0"})
+            with urlopen(url_request, timeout=8) as response:
+                return response.read(8 * 1024 * 1024)
+        path = Path(reference)
+        if path.exists() and path.is_file():
+            return path.read_bytes()
+    except Exception:
+        return None
+    return None
+
+
+def _xlsx_image_from_reference(reference: str) -> tuple[Any, io.BytesIO] | None:
+    image_bytes = _read_export_image_bytes(reference)
+    if not image_bytes:
+        return None
+    try:
+        from PIL import Image as PILImage
+        from openpyxl.drawing.image import Image as XlsxImage
+
+        image = PILImage.open(io.BytesIO(image_bytes))
+        image.load()
+        if image.mode not in {"RGB", "RGBA"}:
+            image = image.convert("RGB")
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        buffer.seek(0)
+        xlsx_image = XlsxImage(buffer)
+        xlsx_image.width = image.width
+        xlsx_image.height = image.height
+        return xlsx_image, buffer
+    except Exception:
+        return None
+
+
+def _settlements_xlsx_payload(payload: dict[str, Any]) -> bytes:
+    rows_value = payload.get("rows")
+    fields_value = payload.get("fields")
+    if not isinstance(rows_value, list):
+        rows_value = []
+    if not isinstance(fields_value, list) or not fields_value:
+        fields_value = SETTLEMENT_IMPORT_FIELDS
+
+    allowed_fields = set(SETTLEMENT_IMPORT_FIELDS)
+    fields = [str(field) for field in fields_value if str(field) in allowed_fields]
+    if not fields:
+        fields = SETTLEMENT_IMPORT_FIELDS
+    rows = [row for row in rows_value if isinstance(row, dict)]
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "社区大V业务看板"
+    worksheet.freeze_panes = "A2"
+
+    header_fill = PatternFill("solid", fgColor="EEF2F7")
+    stat_fill = PatternFill("solid", fgColor="F8FAFC")
+    header_font = Font(bold=True, color="344054")
+    stat_font = Font(bold=True, color="102A43")
+
+    worksheet.append([SETTLEMENT_EXPORT_LABELS.get(field, field) for field in fields])
+    for cell in worksheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    image_buffers: list[io.BytesIO] = []
+    screenshot_column = fields.index("screenshot") + 1 if "screenshot" in fields else 0
+    max_screenshot_width = 0
+    for row_index, row in enumerate(rows, start=2):
+        values = [row.get(field, "") for field in fields]
+        worksheet.append(values)
+        for column_index, field in enumerate(fields, start=1):
+            cell = worksheet.cell(row=row_index, column=column_index)
+            cell.alignment = Alignment(vertical="center", wrap_text=field in {"articleTitle", "notes"})
+            if field in SETTLEMENT_EXPORT_NUMERIC_FIELDS and cell.value not in ("", None):
+                cell.value = _settlement_export_number(cell.value)
+                cell.number_format = "0.00" if field in SETTLEMENT_EXPORT_MONEY_FIELDS else "0"
+        if screenshot_column:
+            reference = _clean_text(row.get("screenshot"))
+            image_result = _xlsx_image_from_reference(reference)
+            if image_result:
+                image, buffer = image_result
+                image_buffers.append(buffer)
+                cell_ref = f"{get_column_letter(screenshot_column)}{row_index}"
+                worksheet.cell(row=row_index, column=screenshot_column).value = ""
+                worksheet.add_image(image, cell_ref)
+                max_screenshot_width = max(max_screenshot_width, image.width)
+                worksheet.row_dimensions[row_index].height = max(90, min(409, image.height * 0.75 + 8))
+
+    stat_row_index = len(rows) + 2
+    worksheet.append(_settlement_export_stats_row(fields, rows))
+    for cell in worksheet[stat_row_index]:
+        cell.fill = stat_fill
+        cell.font = stat_font
+        cell.alignment = Alignment(horizontal="right" if isinstance(cell.value, (int, float)) else "left", vertical="center")
+
+    for column_index, field in enumerate(fields, start=1):
+        column_letter = get_column_letter(column_index)
+        if field in {"link", "articleTitle", "product"}:
+            worksheet.column_dimensions[column_letter].width = 42
+        elif field == "screenshot":
+            worksheet.column_dimensions[column_letter].width = min(255, max(58, max_screenshot_width / 7 if max_screenshot_width else 58))
+        elif field in SETTLEMENT_EXPORT_NUMERIC_FIELDS:
+            worksheet.column_dimensions[column_letter].width = 14
+        else:
+            worksheet.column_dimensions[column_letter].width = 18
+
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -1303,7 +1800,9 @@ def _kol_metrics_xlsx(params: dict[str, Any]) -> bytes:
 
 
 def create_app() -> FastAPI:
+    _load_default_env()
     static_root = _viewer_root() / "post_viewer" / "static"
+    capture_root = _capture_root()
     app = FastAPI(title="easy-viewer", version="0.1.0")
 
     @app.get("/health")
@@ -1351,6 +1850,11 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
+    @app.get("/api/public-base")
+    def public_base(request: FastAPIRequest) -> dict[str, str]:
+        scheme, host = _request_public_base(request) or (request.url.scheme, request.url.netloc)
+        return {"base_url": f"{scheme}://{host}", "host": host}
+
     @app.post("/api/rerun-posts")
     def rerun_posts(payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1361,20 +1865,54 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
     @app.get("/api/settlement-autofill")
-    def settlement_autofill(post_url: str = Query(default="", min_length=1)) -> dict[str, Any]:
+    def settlement_autofill(request: FastAPIRequest, post_url: str = Query(default="", min_length=1)) -> dict[str, Any]:
         try:
-            return _settlement_autofill_payload(post_url)
+            return _settlement_autofill_payload(post_url, request)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
     @app.get("/api/settlements")
-    def settlements(limit: int = Query(default=500, ge=1, le=2000)) -> list[dict[str, Any]]:
+    def settlements(request: FastAPIRequest, limit: int = Query(default=500, ge=1, le=2000)) -> list[dict[str, Any]]:
         try:
-            return _settlements_payload(limit)
+            return _settlements_payload(limit, request)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/settlements/fill-fans-count")
+    def fill_settlement_fans_count(request: FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _fill_settlement_fans_count_payload(payload.get("ids"), request)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/settlements/export.xlsx")
+    def export_settlements_xlsx(payload: dict[str, Any]) -> Response:
+        try:
+            data = _settlements_xlsx_payload(payload)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+        filename = f"kol_business_settlements_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return Response(
+            data,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/settlements/template.xlsx")
+    def settlement_template_xlsx() -> Response:
+        try:
+            data = _settlements_template_xlsx()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+        return Response(
+            data,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": 'attachment; filename="kol_business_settlements_template.xlsx"'},
+        )
 
     @app.get("/api/kol-metrics")
     def kol_metrics(
@@ -1433,26 +1971,28 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/api/settlements/import")
-    def import_settlements(payload: dict[str, Any]) -> dict[str, Any]:
+    def import_settlements(request: FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            return _import_settlements_payload(payload.get("rows"))
+            return _import_settlements_payload(payload.get("rows"), request)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
     @app.post("/api/settlements/import-file")
-    async def import_settlements_file(file: UploadFile = File(...)) -> dict[str, Any]:
+    async def import_settlements_file(request: FastAPIRequest, file: UploadFile = File(...)) -> dict[str, Any]:
         try:
             content = await file.read()
             rows = _parse_settlement_import_file(content, file.filename or "")
-            return _import_settlements_payload(rows)
+            return _import_settlements_payload(rows, request)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
     app.mount("/static", StaticFiles(directory=static_root), name="static")
+    if capture_root is not None:
+        app.mount("/captures", StaticFiles(directory=capture_root), name="captures")
     return app
 
 

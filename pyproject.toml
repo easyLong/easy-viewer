@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",
   "openpyxl>=3.1.0",
+  "Pillow>=10.0.0",
   "python-multipart>=0.0.20",
   "pymysql>=1.1.0",
   "uvicorn>=0.30.0",

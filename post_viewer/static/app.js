@@ -43,9 +43,9 @@ function setActiveView(view, options = {}) {
   if (state.activeView === "rerun") {
     $("#sourceLine").textContent = "重跑帖子阅读数";
   } else if (state.activeView === "settlements") {
-    $("#sourceLine").textContent = "大V商单结算";
+    $("#sourceLine").textContent = "社区大V业务看板";
   } else if (state.activeView === "kolMetrics") {
-    $("#sourceLine").textContent = "每日 KOL 指标";
+    $("#sourceLine").textContent = "大V账号数据统计";
   }
   if (options.push) {
     window.history.pushState({ view: state.activeView }, "", viewPath(state.activeView));

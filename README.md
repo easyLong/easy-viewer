@@ -6,10 +6,10 @@
 
 | 页面 | 路径 | 作用 |
 | --- | --- | --- |
-| 帖子内容 | `/` | 查看 `t_fund_generated_posts` 生成内容和批次 |
+| 小牛书社区内容生产 | `/` | 查看 `t_fund_generated_posts` 生成内容和批次 |
 | 重跑帖子阅读数 | `/rerun` | 按帖子链接把 `crawler_app.task_submissions` 的详情任务重置为待处理 |
-| 大 V 商单结算 | `/settlements` | 导入、补全和查看 `crawler_app.kol_business_settlements` |
-| 每日 KOL 指标 | `/kol-metrics` | 查看、筛选、复制和导出 `crawler_app.kol_daily_metrics` |
+| 社区大V业务看板 | `/settlements` | 导入、补全和查看 `crawler_app.kol_business_settlements` |
+| 大V账号数据统计 | `/kol-metrics` | 查看、筛选、复制和导出 `crawler_app.kol_daily_metrics` |
 
 ## 配置
 
