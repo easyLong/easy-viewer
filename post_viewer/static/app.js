@@ -17,10 +17,12 @@ function viewFromPath() {
   if (window.location.pathname === "/rerun") return "rerun";
   if (window.location.pathname === "/settlements") return "settlements";
   if (window.location.pathname === "/kol-metrics") return "kolMetrics";
+  if (window.location.pathname === "/hot-funds") return "hotFunds";
   return "posts";
 }
 
 function viewPath(view) {
+  if (view === "hotFunds") return "/hot-funds";
   if (view === "kolMetrics") return "/kol-metrics";
   if (view === "settlements") return "/settlements";
   return view === "rerun" ? "/rerun" : "/";
@@ -31,7 +33,7 @@ function isPostsViewActive() {
 }
 
 function setActiveView(view, options = {}) {
-  state.activeView = ["posts", "rerun", "settlements", "kolMetrics"].includes(view) ? view : "posts";
+  state.activeView = ["posts", "rerun", "settlements", "kolMetrics", "hotFunds"].includes(view) ? view : "posts";
   document.querySelectorAll("[data-view]").forEach((section) => {
     section.hidden = section.dataset.view !== state.activeView;
   });
@@ -46,6 +48,9 @@ function setActiveView(view, options = {}) {
     $("#sourceLine").textContent = "社区大V业务看板";
   } else if (state.activeView === "kolMetrics") {
     $("#sourceLine").textContent = "大V账号数据统计";
+  }
+  if (state.activeView === "hotFunds") {
+    $("#sourceLine").textContent = "支付宝热门基金榜";
   }
   if (options.push) {
     window.history.pushState({ view: state.activeView }, "", viewPath(state.activeView));

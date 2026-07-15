@@ -61,10 +61,54 @@
   }
 
   function optionList(values, selected, blankLabel) {
+    const selectedValues = new Set(String(selected || "").split(",").filter(Boolean));
     return [
       `<option value="">${escapeHtml(blankLabel)}</option>`,
-      ...(values || []).map((value) => `<option value="${escapeHtml(value)}"${String(value) === String(selected) ? " selected" : ""}>${escapeHtml(value)}</option>`),
+      ...(values || []).map((value) => `<option value="${escapeHtml(value)}"${selectedValues.has(String(value)) ? " selected" : ""}>${escapeHtml(value)}</option>`),
     ].join("");
+  }
+
+  function selectedDates() {
+    return String(state.filters.date || "").split(",").filter(Boolean);
+  }
+
+  function dateFilterLabel() {
+    const dates = selectedDates();
+    if (!dates.length) return "全部日期";
+    return dates.length === 1 ? dates[0] : `已选 ${dates.length} 个日期`;
+  }
+
+  function renderDateFilter(values) {
+    const menu = $("#kolDateMenu");
+    const trigger = $("#kolDateTrigger");
+    if (!menu || !trigger) return;
+    const wasOpen = !menu.hidden;
+    const selected = new Set(selectedDates());
+    menu.innerHTML = [
+      `<label class="kol-date-option kol-date-option-all"><input type="checkbox" data-date-value=""${selected.size ? "" : " checked"} />全部日期</label>`,
+      ...(values || []).map((value) => `<label class="kol-date-option"><input type="checkbox" data-date-value="${escapeHtml(value)}"${selected.has(String(value)) ? " checked" : ""} />${escapeHtml(value)}</label>`),
+    ].join("");
+    trigger.textContent = dateFilterLabel();
+    menu.hidden = !wasOpen;
+    trigger.setAttribute("aria-expanded", String(wasOpen));
+  }
+
+  function readDateFilterFromMenu() {
+    const menu = $("#kolDateMenu");
+    if (!menu) return;
+    state.filters.date = Array.from(menu.querySelectorAll("input[data-date-value]:checked"))
+      .map((input) => input.dataset.dateValue || "")
+      .filter(Boolean)
+      .join(",");
+  }
+
+  function toggleDateMenu(open) {
+    const menu = $("#kolDateMenu");
+    const trigger = $("#kolDateTrigger");
+    if (!menu || !trigger) return;
+    const nextOpen = typeof open === "boolean" ? open : menu.hidden;
+    menu.hidden = !nextOpen;
+    trigger.setAttribute("aria-expanded", String(nextOpen));
   }
 
   function readFiltersFromUrl() {
@@ -77,7 +121,7 @@
   }
 
   function readFiltersFromInputs() {
-    state.filters.date = $("#kolDateSelect")?.value || "";
+    readDateFilterFromMenu();
     state.filters.platform = $("#kolPlatformSelect")?.value || "";
     state.filters.kol_type = $("#kolTypeSelect")?.value || "";
     state.filters.missing = $("#kolMissingSelect")?.value || "";
@@ -116,7 +160,7 @@
     const payload = state.payload || {};
     const options = payload.options || {};
     const missingOptions = payload.missing_options || {};
-    $("#kolDateSelect").innerHTML = optionList(options.dates || [], state.filters.date, "全部日期");
+    renderDateFilter(options.dates || []);
     $("#kolPlatformSelect").innerHTML = optionList(options.platforms || [], state.filters.platform, "全部平台");
     $("#kolTypeSelect").innerHTML = optionList(options.kol_types || [], state.filters.kol_type, "全部类型");
     $("#kolMissingSelect").innerHTML = Object.entries(missingOptions)
@@ -223,13 +267,38 @@
   }
 
   function bindEvents() {
-    const filterIds = ["#kolDateSelect", "#kolPlatformSelect", "#kolTypeSelect", "#kolMissingSelect", "#kolSortSelect", "#kolLimitInput"];
+    const filterIds = ["#kolPlatformSelect", "#kolTypeSelect", "#kolMissingSelect", "#kolSortSelect", "#kolLimitInput"];
     for (const selector of filterIds) {
       $(selector)?.addEventListener("change", () => {
         readFiltersFromInputs();
         loadKolMetrics();
       });
     }
+    $("#kolDateTrigger")?.addEventListener("click", () => toggleDateMenu());
+    $("#kolDateMenu")?.addEventListener("change", (event) => {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement) || input.type !== "checkbox") return;
+      const allOption = $("#kolDateMenu input[data-date-value='']");
+      if (input.dataset.dateValue === "") {
+        if (input.checked) {
+          $("#kolDateMenu").querySelectorAll("input[data-date-value]").forEach((item) => {
+            if (item !== input) item.checked = false;
+          });
+        }
+      } else if (input.checked && allOption) {
+        allOption.checked = false;
+      }
+      readDateFilterFromMenu();
+      $("#kolDateTrigger").textContent = dateFilterLabel();
+      loadKolMetrics();
+    });
+    document.addEventListener("click", (event) => {
+      const dropdown = $("#kolDateDropdown");
+      if (dropdown && !dropdown.contains(event.target)) toggleDateMenu(false);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") toggleDateMenu(false);
+    });
     $("#kolSearchInput")?.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         readFiltersFromInputs();

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>easy-viewer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260706-dashboard-page-renames" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260713-kol-date-dropdown" />
   </head>
   <body>
     <main class="page">
@@ -26,6 +26,7 @@
             <option value="rerun">重跑帖子阅读数</option>
             <option value="settlements">社区大V业务看板</option>
             <option value="kolMetrics">大V账号数据统计</option>
+            <option value="hotFunds">支付宝热门基金榜</option>
           </select>
         </label>
       </section>
@@ -239,9 +240,12 @@
           </div>
 
           <section class="kol-filter-bar" aria-label="KOL 指标筛选">
-            <label>
+            <label class="kol-date-filter">
               <span>日期</span>
-              <select id="kolDateSelect"></select>
+              <div class="kol-date-dropdown" id="kolDateDropdown">
+                <button id="kolDateTrigger" class="kol-date-trigger" type="button" aria-expanded="false" aria-haspopup="listbox">全部日期</button>
+                <div id="kolDateMenu" class="kol-date-menu" role="listbox" aria-multiselectable="true" hidden></div>
+              </div>
             </label>
             <label>
               <span>平台</span>
@@ -279,12 +283,46 @@
           </div>
         </section>
       </section>
+      <section id="hotFundsView" class="app-view" data-view="hotFunds" hidden>
+        <section class="kol-panel hot-funds-panel" aria-label="支付宝热门基金榜">
+          <div class="section-head kol-head">
+            <div>
+              <h2>支付宝热门基金榜</h2>
+              <p id="hotFundsSourceLine">crawler_app.alipay_hot_fund_rankings</p>
+            </div>
+            <div class="kol-actions">
+              <button id="hotFundsRefreshButton" type="button">刷新</button>
+              <button id="hotFundsCopyButton" class="secondary" type="button">复制表格</button>
+            </div>
+          </div>
+
+          <section class="kol-filter-bar hot-funds-filter-bar" aria-label="支付宝热门基金榜筛选">
+            <label>
+              <span>日期</span>
+              <select id="hotFundsDateSelect"></select>
+            </label>
+            <label>
+              <span>行数</span>
+              <input id="hotFundsLimitInput" type="number" min="1" max="1000" value="200" />
+            </label>
+          </section>
+
+          <section class="summary kol-summary" id="hotFundsSummary"></section>
+
+          <div class="kol-table-wrap hot-funds-table-wrap">
+            <table class="kol-table hot-funds-table" aria-label="支付宝热门基金榜表">
+              <thead id="hotFundsTableHead"></thead>
+              <tbody id="hotFundsTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
     </main>
 
     <script>
       (() => {
         const path = window.location.pathname;
-        const activeView = path === "/rerun" ? "rerun" : path === "/settlements" ? "settlements" : path === "/kol-metrics" ? "kolMetrics" : "posts";
+        const activeView = path === "/rerun" ? "rerun" : path === "/settlements" ? "settlements" : path === "/kol-metrics" ? "kolMetrics" : path === "/hot-funds" ? "hotFunds" : "posts";
         document.querySelectorAll("[data-view]").forEach((section) => {
           section.hidden = section.dataset.view !== activeView;
         });
@@ -294,9 +332,10 @@
         if (refreshButton) refreshButton.hidden = activeView !== "posts";
       })();
     </script>
-    <script src="/static/app.js?v=20260706-dashboard-page-renames"></script>
+    <script src="/static/app.js?v=20260715-hot-funds"></script>
     <script src="/static/rerun.js?v=20260706-dashboard-page-renames"></script>
     <script src="/static/settlements.js?v=20260707-settlement-missing-metrics"></script>
-    <script src="/static/kol_metrics.js?v=20260706-dashboard-page-renames"></script>
+    <script src="/static/kol_metrics.js?v=20260713-kol-date-dropdown"></script>
+    <script src="/static/hot_funds.js?v=20260715-hot-funds-code"></script>
   </body>
 </html>

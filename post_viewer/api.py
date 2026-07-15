@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from datetime import date, datetime, timedelta
 from xml.etree import ElementTree as ET
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import FastAPI, File, HTTPException, Query, Request as FastAPIRequest, UploadFile
@@ -30,6 +30,7 @@ TASK_SUBMISSION_TABLE = "crawler_app.task_submissions"
 SETTLEMENT_TABLE = "crawler_app.kol_business_settlements"
 KOL_DAILY_METRICS_TABLE = "crawler_app.kol_daily_metrics"
 KOL_BASE_PROFILE_TABLE = "crawler_app.kol_base_profiles"
+ALIPAY_HOT_FUND_RANKINGS_TABLE = "crawler_app.alipay_hot_fund_rankings"
 KOL_MAX_LIMIT = 2000
 KOL_SORT_OPTIONS = {
     "base_id": "CASE WHEN b.id IS NULL THEN 1 ELSE 0 END, b.id ASC, m.metric_date DESC, m.platform ASC, m.kol_name ASC",
@@ -56,26 +57,59 @@ def _viewer_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _capture_root() -> Path | None:
+def _capture_mounts() -> list[tuple[str, Path]]:
     configured = os.environ.get("EASY_VIEWER_CAPTURE_ROOT", "").strip()
-    candidates: list[Path] = []
+    candidates: list[tuple[str, Path]] = []
     if configured:
-        candidates.extend(Path(item.strip()) for item in configured.split(os.pathsep) if item.strip())
+        configured_paths = [Path(item.strip()) for item in configured.split(os.pathsep) if item.strip()]
+        candidates.extend((f"/captures-extra-{index}" if index > 1 else "/captures", path) for index, path in enumerate(configured_paths, start=1))
     root = _viewer_root()
     candidates.extend(
         [
-            root / "captures",
-            root.parent / "adb" / "apps" / "finance_crawler" / "captures",
-            root.parent / "adb" / "runtime" / "captures",
+            ("/captures", root / "captures"),
+            ("/captures-adb-finance", root.parent / "adb" / "apps" / "finance_crawler" / "captures"),
+            ("/captures-adb-runtime", root.parent / "adb" / "runtime" / "captures"),
+            ("/captures-adb-tmp", root.parent / "adb" / "tmp"),
         ]
     )
-    for path in candidates:
+    mounts: list[tuple[str, Path]] = []
+    seen_paths: set[Path] = set()
+    seen_mounts: set[str] = set()
+    for mount_path, path in candidates:
         try:
-            if path.exists() and path.is_dir():
-                return path
+            resolved = path.resolve()
+            if not path.exists() or not path.is_dir() or resolved in seen_paths:
+                continue
+            if mount_path in seen_mounts:
+                mount_path = f"{mount_path}-{len(seen_mounts) + 1}"
+            mounts.append((mount_path, path))
+            seen_paths.add(resolved)
+            seen_mounts.add(mount_path)
         except OSError:
             continue
-    return None
+    return mounts
+
+
+def _capture_root() -> Path | None:
+    mounts = _capture_mounts()
+    return mounts[0][1] if mounts else None
+
+
+def _capture_url_path(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        source = Path(text).resolve()
+    except OSError:
+        return ""
+    for mount_path, capture_root in _capture_mounts():
+        try:
+            relative = source.relative_to(capture_root.resolve())
+        except (OSError, ValueError):
+            continue
+        return mount_path.rstrip("/") + "/" + quote(relative.as_posix())
+    return ""
 
 
 def _load_env_file(path: Path) -> None:
@@ -236,7 +270,14 @@ def _externalize_local_url(value: Any, request: FastAPIRequest | None) -> str:
         return ""
     parsed = urlparse(text)
     if parsed.scheme not in {"http", "https"}:
-        return text
+        capture_path = _capture_url_path(text)
+        if not capture_path:
+            return text
+        public_base = _request_public_base(request) or _configured_public_base("http")
+        if public_base is None:
+            return capture_path
+        scheme, host = public_base
+        return f"{scheme}://{host}{capture_path}"
     hostname = (parsed.hostname or "").lower()
     if hostname not in LOCAL_URL_HOSTS:
         return text
@@ -803,6 +844,8 @@ SETTLEMENT_DB_COLUMNS = [
     "source_payload_json",
 ]
 SETTLEMENT_NUMERIC_DB_COLUMNS = {"fans_count", "fee", "creator_fee", "buy_amount", "read_count", "comment_count", "like_count"}
+SETTLEMENT_AUTOFILL_DB_COLUMNS = {"fans_count", "article_title", "screenshot_url", "read_count", "comment_count", "like_count"}
+SETTLEMENT_TEXT_PLACEHOLDERS = ("0", "机器识别", "自动识别", "程序识别", "待识别", "最好程序能帮填写")
 
 
 def _ensure_settlement_table(connection: Any) -> None:
@@ -878,8 +921,18 @@ def _settlement_url_hash(post_url: str) -> str:
 
 def _settlement_import_update_sql(columns: list[str]) -> str:
     assignments: list[str] = []
+    text_placeholder_sql = " OR ".join(
+        f"VALUES({{column}}) LIKE CONCAT(CHAR(37), '{placeholder}', CHAR(37))"
+        for placeholder in SETTLEMENT_TEXT_PLACEHOLDERS
+        if placeholder != "0"
+    )
     for column in columns:
-        if column in SETTLEMENT_NUMERIC_DB_COLUMNS:
+        if column in SETTLEMENT_AUTOFILL_DB_COLUMNS and column in SETTLEMENT_NUMERIC_DB_COLUMNS:
+            assignments.append(f"{column} = CASE WHEN VALUES({column}) IS NULL OR VALUES({column}) = 0 THEN {column} ELSE VALUES({column}) END")
+        elif column in SETTLEMENT_AUTOFILL_DB_COLUMNS:
+            placeholder_sql = text_placeholder_sql.format(column=column)
+            assignments.append(f"{column} = CASE WHEN VALUES({column}) IS NULL OR VALUES({column}) = '' OR VALUES({column}) = '0' OR {placeholder_sql} THEN {column} ELSE VALUES({column}) END")
+        elif column in SETTLEMENT_NUMERIC_DB_COLUMNS:
             assignments.append(f"{column} = COALESCE(VALUES({column}), {column})")
         else:
             assignments.append(f"{column} = CASE WHEN VALUES({column}) IS NULL OR VALUES({column}) = '' THEN {column} ELSE VALUES({column}) END")
@@ -901,6 +954,13 @@ def _first_non_empty_value(*values: Any) -> Any:
 
 def _is_zero_placeholder(value: Any) -> bool:
     return re.fullmatch(r"0+(?:\.0+)?", _clean_text(value)) is not None
+
+
+def _is_settlement_text_placeholder(value: Any) -> bool:
+    text = _clean_text(value)
+    if not text:
+        return False
+    return _is_zero_placeholder(text) or any(placeholder != "0" and placeholder in text for placeholder in SETTLEMENT_TEXT_PLACEHOLDERS)
 
 
 def _settlement_identity_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -1145,10 +1205,11 @@ def _normalize_settlement_row(raw: dict[str, Any]) -> dict[str, Any]:
         "notes": _clean_text(_first_non_empty_value(raw.get("notes"), raw.get("备注"))),
         "source_payload_json": json.dumps(raw, ensure_ascii=False, default=str),
     }
-    if normalized["fans_count"] is not None and normalized["fans_count"] <= 0:
-        normalized["fans_count"] = None
+    for metric_column in ("fans_count", "read_count", "comment_count", "like_count"):
+        if normalized[metric_column] is not None and normalized[metric_column] <= 0:
+            normalized[metric_column] = None
     for text_column in ("article_title", "screenshot_url"):
-        if _is_zero_placeholder(normalized[text_column]):
+        if _is_settlement_text_placeholder(normalized[text_column]):
             normalized[text_column] = ""
     missing_identity_fields = [
         label
@@ -1535,6 +1596,15 @@ def _parse_date(value: str | None) -> date | None:
         return None
 
 
+def _parse_dates(value: Any) -> list[date]:
+    dates: list[date] = []
+    for item in str(value or "").split(","):
+        parsed = _parse_date(item.strip())
+        if parsed and parsed not in dates:
+            dates.append(parsed)
+    return dates
+
+
 def _parse_int(value: Any, default: int | None = None) -> int | None:
     if value in (None, ""):
         return default
@@ -1576,8 +1646,10 @@ def _kol_normalize_filters(params: dict[str, Any]) -> dict[str, Any]:
     missing = str(params.get("missing") or "")
     if missing not in KOL_MISSING_OPTIONS:
         missing = ""
+    metric_dates = _parse_dates(params.get("date"))
     return {
-        "metric_date": _parse_date(str(params.get("date") or "")),
+        "metric_date": metric_dates[0] if len(metric_dates) == 1 else None,
+        "metric_dates": metric_dates,
         "platform": str(params.get("platform") or "").strip(),
         "kol_type": str(params.get("kol_type") or "").strip(),
         "missing": missing,
@@ -1590,9 +1662,11 @@ def _kol_normalize_filters(params: dict[str, Any]) -> dict[str, Any]:
 def _kol_where_clause(filters: dict[str, Any]) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     args: list[Any] = []
-    if filters["metric_date"]:
-        clauses.append("m.metric_date = %s")
-        args.append(filters["metric_date"])
+    metric_dates = filters.get("metric_dates") or []
+    if metric_dates:
+        placeholders = ", ".join(["%s"] * len(metric_dates))
+        clauses.append(f"m.metric_date IN ({placeholders})")
+        args.extend(metric_dates)
     if filters["platform"]:
         clauses.append("m.platform = %s")
         args.append(filters["platform"])
@@ -1747,6 +1821,7 @@ def _kol_metrics_payload(params: dict[str, Any]) -> dict[str, Any]:
             "filters": {
                 **filters,
                 "metric_date": _date_text(filters["metric_date"]),
+                "metric_dates": [_date_text(item) for item in filters["metric_dates"]],
             },
             "missing_options": KOL_MISSING_OPTIONS,
             "sort_options": list(KOL_SORT_OPTIONS),
@@ -1759,6 +1834,110 @@ def _kol_metrics_payload(params: dict[str, Any]) -> dict[str, Any]:
 
 def _kol_excel_value(value: Any) -> Any:
     return "" if value is None else value
+
+
+def _hot_fund_columns() -> list[tuple[str, str]]:
+    return [
+        ("日期", "snapshot_date"),
+        ("排名", "rank_no"),
+        ("基金代码", "fund_code"),
+        ("基金名称", "fund_name"),
+        ("截图", "screenshot_url"),
+    ]
+
+
+def _hot_fund_normalize_filters(params: dict[str, Any]) -> dict[str, Any]:
+    limit = _parse_int(params.get("limit"), 200) or 200
+    return {
+        "snapshot_date": _parse_date(str(params.get("date") or "").strip()),
+        "limit": min(max(limit, 1), 1000),
+    }
+
+
+def _hot_fund_options(connection: Any) -> dict[str, Any]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT DISTINCT snapshot_date
+            FROM {ALIPAY_HOT_FUND_RANKINGS_TABLE}
+            ORDER BY snapshot_date DESC
+            """
+        )
+        dates = [_date_text(row.get("snapshot_date")) for row in cursor.fetchall()]
+    return {"dates": dates}
+
+
+def _hot_fund_filter_sql(filters: dict[str, Any]) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    args: list[Any] = []
+    if filters["snapshot_date"]:
+        clauses.append("snapshot_date = %s")
+        args.append(filters["snapshot_date"])
+    return ("WHERE " + " AND ".join(clauses), args) if clauses else ("", args)
+
+
+def _hot_fund_rows(connection: Any, filters: dict[str, Any], request: FastAPIRequest | None = None) -> list[dict[str, Any]]:
+    where_sql, args = _hot_fund_filter_sql(filters)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT snapshot_date, rank_no, fund_code, fund_name, screenshot_path
+            FROM {ALIPAY_HOT_FUND_RANKINGS_TABLE}
+            {where_sql}
+            ORDER BY snapshot_date DESC, rank_no ASC
+            LIMIT %s
+            """,
+            (*args, int(filters["limit"])),
+        )
+        rows = []
+        for row in cursor.fetchall():
+            screenshot_path = str(row.get("screenshot_path") or "")
+            rows.append(
+                {
+                    "snapshot_date": _date_text(row.get("snapshot_date")),
+                    "rank_no": row.get("rank_no"),
+                    "fund_code": str(row.get("fund_code") or ""),
+                    "fund_name": str(row.get("fund_name") or ""),
+                    "screenshot_path": screenshot_path,
+                    "screenshot_url": _externalize_local_url(screenshot_path, request),
+                }
+            )
+        return rows
+
+
+def _hot_fund_summary(connection: Any, filters: dict[str, Any]) -> dict[str, int]:
+    where_sql, args = _hot_fund_filter_sql(filters)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total_rows,
+                COUNT(DISTINCT snapshot_date) AS date_count,
+                SUM(screenshot_path IS NOT NULL AND screenshot_path <> '') AS screenshot_rows
+            FROM {ALIPAY_HOT_FUND_RANKINGS_TABLE}
+            {where_sql}
+            """,
+            args,
+        )
+        row = cursor.fetchone() or {}
+    return {key: int(value or 0) for key, value in row.items()}
+
+
+def _hot_fund_rankings_payload(params: dict[str, Any], request: FastAPIRequest | None = None) -> dict[str, Any]:
+    filters = _hot_fund_normalize_filters(params)
+    with _connect() as connection:
+        return {
+            "source": "mysql",
+            "table": ALIPAY_HOT_FUND_RANKINGS_TABLE,
+            "filters": {
+                **filters,
+                "snapshot_date": _date_text(filters["snapshot_date"]),
+            },
+            "options": _hot_fund_options(connection),
+            "summary": _hot_fund_summary(connection, filters),
+            "columns": _hot_fund_columns(),
+            "rows": _hot_fund_rows(connection, filters, request),
+        }
 
 
 def _kol_metrics_xlsx(params: dict[str, Any]) -> bytes:
@@ -1802,7 +1981,7 @@ def _kol_metrics_xlsx(params: dict[str, Any]) -> bytes:
 def create_app() -> FastAPI:
     _load_default_env()
     static_root = _viewer_root() / "post_viewer" / "static"
-    capture_root = _capture_root()
+    capture_mounts = _capture_mounts()
     app = FastAPI(title="easy-viewer", version="0.1.0")
 
     @app.get("/health")
@@ -1827,6 +2006,10 @@ def create_app() -> FastAPI:
 
     @app.get("/kol-metrics", response_class=HTMLResponse)
     def kol_metrics_page() -> str:
+        return (static_root / "index.html").read_text(encoding="utf-8")
+
+    @app.get("/hot-funds", response_class=HTMLResponse)
+    def hot_funds_page() -> str:
         return (static_root / "index.html").read_text(encoding="utf-8")
 
     @app.get("/api/batches")
@@ -1970,6 +2153,17 @@ def create_app() -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @app.get("/api/hot-funds")
+    def hot_funds(
+        request: FastAPIRequest,
+        date: str = "",
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        try:
+            return _hot_fund_rankings_payload({"date": date, "limit": limit}, request)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
     @app.post("/api/settlements/import")
     def import_settlements(request: FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1991,8 +2185,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
     app.mount("/static", StaticFiles(directory=static_root), name="static")
-    if capture_root is not None:
-        app.mount("/captures", StaticFiles(directory=capture_root), name="captures")
+    for mount_path, capture_root in capture_mounts:
+        mount_name = "captures_" + re.sub(r"[^a-zA-Z0-9_]+", "_", mount_path.strip("/"))
+        app.mount(mount_path, StaticFiles(directory=capture_root), name=mount_name)
     return app
 
 

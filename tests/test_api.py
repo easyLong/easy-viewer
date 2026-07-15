@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -129,6 +130,56 @@ class FakeConnection:
 
     def commit(self) -> None:
         return None
+
+
+class HotFundCursor:
+    def __init__(self, connection: "HotFundConnection") -> None:
+        self.connection = connection
+        self.result: list[dict[str, Any]] = []
+
+    def __enter__(self) -> "HotFundCursor":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> None:
+        self.connection.queries.append((sql, tuple(params)))
+        if "SELECT DISTINCT snapshot_date" in sql:
+            self.result = [{"snapshot_date": date(2026, 7, 15)}, {"snapshot_date": date(2026, 7, 14)}]
+        elif "COUNT(*) AS total_rows" in sql:
+            self.result = [{"total_rows": 1, "date_count": 1, "screenshot_rows": 1}]
+        elif "SELECT snapshot_date, rank_no, fund_code, fund_name, screenshot_path" in sql:
+            self.result = [
+                {
+                    "snapshot_date": date(2026, 7, 15),
+                    "rank_no": 1,
+                    "fund_code": "000001",
+                    "fund_name": "测试基金",
+                    "screenshot_path": str(self.connection.screenshot_path),
+                }
+            ]
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self.result[0] if self.result else None
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self.result
+
+
+class HotFundConnection:
+    def __init__(self, screenshot_path: Any) -> None:
+        self.screenshot_path = screenshot_path
+        self.queries: list[tuple[str, tuple[Any, ...]]] = []
+
+    def __enter__(self) -> "HotFundConnection":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> HotFundCursor:
+        return HotFundCursor(self)
 
 
 class RerunCursor:
@@ -363,3 +414,132 @@ def test_kol_metrics_api_reads_crawler_app_metrics(monkeypatch) -> None:
     assert body["filters"]["metric_date"] == "2026-06-30"
     assert any("crawler_app.kol_daily_metrics" in sql for sql, _params in connection.queries)
     assert any("crawler_app.kol_base_profiles" in sql for sql, _params in connection.queries)
+
+
+def test_kol_metrics_supports_multiple_dates() -> None:
+    filters = api._kol_normalize_filters({"date": "2026-06-30,2026-06-29"})
+
+    where_sql, args = api._kol_where_clause(filters)
+
+    assert filters["metric_date"] is None
+    assert filters["metric_dates"] == [
+        api.date(2026, 6, 30),
+        api.date(2026, 6, 29),
+    ]
+    assert "m.metric_date IN (%s, %s)" in where_sql
+    assert args == [api.date(2026, 6, 30), api.date(2026, 6, 29)]
+
+
+def test_settlement_import_treats_zero_autofill_values_as_empty() -> None:
+    row = api._normalize_settlement_row(
+        {
+            "日期": "2026-07-01",
+            "合作方": "partner",
+            "投放平台": "platform",
+            "产品": "product",
+            "IP名称": "ip",
+            "粉丝数": "0",
+            "文章类型": "宣传贴",
+            "链接": "https://example.com/post",
+            "文章标题": "0",
+            "截图": "0",
+            "阅读量": "0",
+            "评论": "0",
+            "点赞": "0",
+        }
+    )
+
+    assert row["fans_count"] is None
+    assert row["article_title"] == ""
+    assert row["screenshot_url"] == ""
+    assert row["read_count"] is None
+    assert row["comment_count"] is None
+    assert row["like_count"] is None
+
+
+def test_settlement_import_treats_machine_recognition_labels_as_empty() -> None:
+    row = api._normalize_settlement_row(
+        {
+            "日期": "2026-07-01",
+            "合作方": "partner",
+            "投放平台": "platform",
+            "产品": "product",
+            "IP名称": "ip",
+            "文章类型": "宣传贴",
+            "链接": "https://example.com/post",
+            "文章标题": "机器识别",
+            "截图": "最好程序能帮填写",
+        }
+    )
+    row_with_zero_url = api._normalize_settlement_row(
+        {
+            "日期": "2026-07-01",
+            "合作方": "partner",
+            "投放平台": "platform",
+            "产品": "product",
+            "IP名称": "ip2",
+            "文章类型": "宣传贴",
+            "链接": "https://example.com/post2",
+            "文章标题": "有效标题 2026",
+            "截图": "https://example.com/image-20260707.png",
+        }
+    )
+
+    assert row["article_title"] == ""
+    assert row["screenshot_url"] == ""
+    assert row_with_zero_url["article_title"] == "有效标题 2026"
+    assert row_with_zero_url["screenshot_url"] == "https://example.com/image-20260707.png"
+
+
+def test_settlement_import_update_sql_does_not_overwrite_autofill_with_zero() -> None:
+    sql = api._settlement_import_update_sql(
+        ["fans_count", "article_title", "screenshot_url", "read_count", "comment_count", "like_count", "fee"]
+    )
+
+    assert "VALUES(fans_count) IS NULL OR VALUES(fans_count) = 0" in sql
+    assert "VALUES(article_title) IS NULL OR VALUES(article_title) = '' OR VALUES(article_title) = '0'" in sql
+    assert "VALUES(screenshot_url) IS NULL OR VALUES(screenshot_url) = '' OR VALUES(screenshot_url) = '0'" in sql
+    assert "VALUES(article_title) LIKE CONCAT(CHAR(37), '机器识别', CHAR(37))" in sql
+    assert "VALUES(screenshot_url) LIKE CONCAT(CHAR(37), '最好程序能帮填写', CHAR(37))" in sql
+    assert "VALUES(read_count) IS NULL OR VALUES(read_count) = 0" in sql
+    assert "VALUES(comment_count) IS NULL OR VALUES(comment_count) = 0" in sql
+    assert "VALUES(like_count) IS NULL OR VALUES(like_count) = 0" in sql
+    assert "fee = COALESCE(VALUES(fee), fee)" in sql
+
+
+def test_externalize_local_capture_path_uses_public_base(monkeypatch, tmp_path) -> None:
+    capture_root = tmp_path / "captures"
+    image_path = capture_root / "record_1" / "page_000.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"png")
+    monkeypatch.setenv("EASY_VIEWER_CAPTURE_ROOT", str(capture_root))
+    monkeypatch.setenv("EASY_VIEWER_PUBLIC_BASE_URL", "http://192.168.1.30:8898")
+
+    assert api._externalize_local_url(str(image_path), None) == "http://192.168.1.30:8898/captures/record_1/page_000.png"
+
+
+def test_hot_fund_rankings_payload_filters_date_and_externalizes_screenshot(monkeypatch, tmp_path) -> None:
+    capture_root = tmp_path / "captures"
+    image_path = capture_root / "hot_funds" / "rank_001.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"png")
+    connection = HotFundConnection(image_path)
+    monkeypatch.setenv("EASY_VIEWER_CAPTURE_ROOT", str(capture_root))
+    monkeypatch.setenv("EASY_VIEWER_PUBLIC_BASE_URL", "http://192.168.1.30:8898")
+    monkeypatch.setattr(api, "_connect", lambda: connection)
+
+    payload = api._hot_fund_rankings_payload({"date": "2026-07-15", "limit": 20})
+
+    assert payload["table"] == api.ALIPAY_HOT_FUND_RANKINGS_TABLE
+    assert payload["filters"]["snapshot_date"] == "2026-07-15"
+    assert payload["options"]["dates"] == ["2026-07-15", "2026-07-14"]
+    assert payload["columns"] == [
+        ("日期", "snapshot_date"),
+        ("排名", "rank_no"),
+        ("基金代码", "fund_code"),
+        ("基金名称", "fund_name"),
+        ("截图", "screenshot_url"),
+    ]
+    assert payload["rows"][0]["fund_code"] == "000001"
+    assert payload["rows"][0]["screenshot_url"] == "http://192.168.1.30:8898/captures/hot_funds/rank_001.png"
+    assert any(params == (date(2026, 7, 15), 20) for _sql, params in connection.queries)
