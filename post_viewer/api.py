@@ -70,6 +70,7 @@ def _capture_mounts() -> list[tuple[str, Path]]:
             ("/captures-adb-finance", root.parent / "adb" / "apps" / "finance_crawler" / "captures"),
             ("/captures-adb-runtime", root.parent / "adb" / "runtime" / "captures"),
             ("/captures-adb-tmp", root.parent / "adb" / "tmp"),
+            ("/captures-adb-exports", root.parent / "adb" / "exports"),
         ]
     )
     mounts: list[tuple[str, Path]] = []
@@ -1178,8 +1179,6 @@ def _settlement_api_row(row: dict[str, Any], request: FastAPIRequest | None = No
 
 def _normalize_settlement_row(raw: dict[str, Any]) -> dict[str, Any]:
     post_url = _clean_text(_first_non_empty_value(raw.get("link"), raw.get("post_url"), raw.get("链接")))
-    if not post_url:
-        raise ValueError("导入行缺少链接")
     settlement_date = _clean_date(_first_non_empty_value(raw.get("date"), raw.get("settlement_date"), raw.get("日期")))
     normalized = {
         "settlement_date": settlement_date,
@@ -1211,13 +1210,6 @@ def _normalize_settlement_row(raw: dict[str, Any]) -> dict[str, Any]:
     for text_column in ("article_title", "screenshot_url"):
         if _is_settlement_text_placeholder(normalized[text_column]):
             normalized[text_column] = ""
-    missing_identity_fields = [
-        label
-        for label, column in (("产品", "product_name"), ("IP名称", "ip_name"), ("文章类型", "article_type"))
-        if not normalized[column]
-    ]
-    if missing_identity_fields:
-        raise ValueError("导入行缺少唯一键字段：" + "、".join(missing_identity_fields))
     return normalized
 
 
@@ -1257,6 +1249,9 @@ def _import_settlements_payload(rows_value: Any, request: FastAPIRequest | None 
             errors.append({"row": index, "error": str(exc)})
 
     if not normalized_rows:
+        if errors:
+            first_errors = "；".join(f"第{item['row']}行：{item['error']}" for item in errors[:5])
+            raise ValueError("没有有效行可导入；" + first_errors)
         raise ValueError("没有有效行可导入")
 
     with _connect() as connection:
@@ -1439,7 +1434,7 @@ def _settlements_template_xlsx() -> bytes:
         "likeCount": "",
         "partnerPaymentStatus": "未打款",
         "creatorSettlementStatus": "未结算",
-        "notes": "日期 + IP名称 + 产品 + 文章类型用于去重，重复导入会更新同一条记录",
+        "notes": "日期 + IP名称 + 产品 + 文章类型用于去重；产品和文章类型可为空，空值会参与去重",
     }
     worksheet.append([sample_row.get(field, "") for field in fields])
 

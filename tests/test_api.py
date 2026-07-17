@@ -491,6 +491,26 @@ def test_settlement_import_treats_machine_recognition_labels_as_empty() -> None:
     assert row_with_zero_url["screenshot_url"] == "https://example.com/image-20260707.png"
 
 
+def test_settlement_import_allows_empty_identity_parts_except_date() -> None:
+    row = api._normalize_settlement_row(
+        {
+            "日期": "2026-07-16",
+            "合作方": "partner",
+            "投放平台": "platform",
+            "产品": "",
+            "IP名称": "",
+            "文章类型": "",
+            "链接": "",
+        }
+    )
+
+    assert row["post_url"] == ""
+    assert row["ip_name"] == ""
+    assert row["product_name"] == ""
+    assert row["article_type"] == ""
+    assert api._settlement_identity_key(row) == ("2026-07-16", "", "", "")
+
+
 def test_settlement_import_update_sql_does_not_overwrite_autofill_with_zero() -> None:
     sql = api._settlement_import_update_sql(
         ["fans_count", "article_title", "screenshot_url", "read_count", "comment_count", "like_count", "fee"]

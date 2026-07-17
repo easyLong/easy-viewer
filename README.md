@@ -46,6 +46,7 @@ captures
 ..\adb\apps\finance_crawler\captures
 ..\adb\runtime\captures
 ..\adb\tmp
+..\adb\exports
 ```
 
 ## 启动
@@ -166,6 +167,8 @@ GET /api/hot-funds?date=2026-07-15&limit=200
 | `fund_code` | 基金代码 |
 | `fund_name` | 基金名称 |
 | `screenshot_url` | 可点击的局域网 HTTP 截图地址 |
+
+商单结算导入时只要求 `日期` 必填，其它字段可以为空。去重仍使用 `日期 + IP名称 + 产品 + 文章类型`，空值会按空字符串参与去重。
 
 ## 数据表
 
