@@ -155,6 +155,12 @@
               </select>
             </label>
             <label>
+              <span>内外部</span>
+              <select id="settlementKolTypeSelect">
+                <option value="">全部内外部</option>
+              </select>
+            </label>
+            <label>
               <span>IP名称</span>
               <select id="settlementIpNameSelect">
                 <option value="">全部 IP</option>
@@ -234,6 +240,7 @@
             </div>
             <div class="kol-actions">
               <button id="kolMetricsRefreshButton" type="button">刷新</button>
+              <button id="kolMetricsFillReadButton" class="secondary" type="button">补充阅读数</button>
               <button id="kolMetricsCopyButton" class="secondary" type="button">复制表格</button>
               <button id="kolMetricsExportButton" class="secondary" type="button">下载 Excel</button>
             </div>
@@ -334,8 +341,8 @@
     </script>
     <script src="/static/app.js?v=20260715-hot-funds"></script>
     <script src="/static/rerun.js?v=20260706-dashboard-page-renames"></script>
-    <script src="/static/settlements.js?v=20260707-settlement-missing-metrics"></script>
-    <script src="/static/kol_metrics.js?v=20260713-kol-date-dropdown"></script>
+    <script src="/static/settlements.js?v=20260721-settlement-kol-type-filter"></script>
+    <script src="/static/kol_metrics.js?v=20260720-fill-read-count"></script>
     <script src="/static/hot_funds.js?v=20260715-hot-funds-code"></script>
   </body>
 </html>

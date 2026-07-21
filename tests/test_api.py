@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import date
 from typing import Any
 
@@ -326,6 +327,51 @@ class KolMetricsConnection:
         return KolMetricsCursor(self)
 
 
+class KolReadFillCursor:
+    def __init__(self, connection: "KolReadFillConnection") -> None:
+        self.connection = connection
+        self.result: list[dict[str, Any]] = []
+        self.rowcount = 0
+
+    def __enter__(self) -> "KolReadFillCursor":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+        self.connection.queries.append((sql, params))
+        self.rowcount = 0
+        if "SELECT COUNT(*) AS matched_rows" in sql:
+            self.result = [{"matched_rows": 1 if params == ("2026-07-20", "acct", "理财通", "内部") else 0}]
+        elif f"UPDATE {api.KOL_DAILY_METRICS_TABLE} AS m" in sql:
+            self.connection.updates.append(params)
+            self.rowcount = 1 if params == (888, "2026-07-20", "acct", "理财通", "内部") else 0
+            self.result = []
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self.result[0] if self.result else None
+
+
+class KolReadFillConnection:
+    def __init__(self) -> None:
+        self.queries: list[tuple[str, tuple[Any, ...]]] = []
+        self.updates: list[tuple[Any, ...]] = []
+        self.committed = False
+
+    def __enter__(self) -> "KolReadFillConnection":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> KolReadFillCursor:
+        return KolReadFillCursor(self)
+
+    def commit(self) -> None:
+        self.committed = True
+
+
 def test_posts_api_reads_mysql_rows(monkeypatch) -> None:
     monkeypatch.setattr(api, "_connect", lambda: FakeConnection())
     client = TestClient(api.create_app())
@@ -430,7 +476,152 @@ def test_kol_metrics_supports_multiple_dates() -> None:
     assert args == [api.date(2026, 6, 30), api.date(2026, 6, 29)]
 
 
-def test_settlement_import_treats_zero_autofill_values_as_empty() -> None:
+def test_kol_read_count_source_skips_empty_and_sums_duplicates() -> None:
+    rows, stats = api._normalize_kol_read_source_rows(
+        [
+            {"日期": "2026-07-20", "账号名称": "acct", "T文章阅读数": ""},
+            {"日期": "2026-07-20", "账号名称": "acct", "T文章阅读数": "777"},
+            {"日期": "2026-07-20", "账号名称": "acct", "T文章阅读数": "888"},
+        ]
+    )
+
+    assert stats["source_rows"] == 3
+    assert stats["empty_read_rows"] == 1
+    assert stats["duplicate_rows"] == 1
+    assert stats["valid_rows"] == 1
+    assert rows == [
+        {
+            "metric_date": "2026-07-20",
+            "kol_name": "acct",
+            "platform": "理财通",
+            "kol_type": "内部",
+            "read_count": 1665,
+        }
+    ]
+
+
+def test_kol_read_count_source_uses_default_date_for_empty_date() -> None:
+    rows, stats = api._normalize_kol_read_source_rows(
+        [{"日期": "", "账号名称": "acct", "T文章阅读数": "888"}],
+        default_date="0713",
+    )
+
+    assert stats["valid_rows"] == 1
+    assert rows[0]["metric_date"] == "2026-07-13"
+    assert rows[0]["read_count"] == 888
+
+
+def test_kol_read_count_source_prefers_tencent_openapi(monkeypatch) -> None:
+    monkeypatch.setattr(api, "_tencent_sheet_values_rows", lambda _url: [{"日期": "2026-07-20", "账号名称": "acct", "T文章阅读数": "888"}])
+    monkeypatch.setattr(api, "_fetch_qq_docs_sheet_text", lambda _url: "日期\t账号名称\tT文章阅读数\nacct\tbad\t1")
+    monkeypatch.setattr(api, "_fetch_url_text", lambda _url: "")
+
+    rows = api._fetch_kol_read_source_rows("https://docs.qq.com/sheet/DYnBmZ2drS3B2QVRZ?tab=BB08J2")
+
+    assert rows == [{"日期": "2026-07-20", "账号名称": "acct", "T文章阅读数": "888"}]
+
+
+def test_kol_read_count_source_fills_merged_date_cells() -> None:
+    rows = api._kol_read_rows_from_matrix(
+        [
+            ["日期", "账号名称", "T文章阅读数"],
+            ["2026-07-17", "acct-a", "100"],
+            ["", "acct-b", "200"],
+        ]
+    )
+
+    assert rows == [
+        {"metric_date": "2026-07-17", "kol_name": "acct-a", "read_count": "100"},
+        {"metric_date": "2026-07-17", "kol_name": "acct-b", "read_count": "200"},
+    ]
+
+
+def test_tencent_cell_text_reads_time_cells() -> None:
+    assert (
+        api._tencent_cell_text({"cellValue": {"time": {"year": 2026, "month": 7, "day": 20}}})
+        == "2026-07-20"
+    )
+
+
+def test_load_env_file_overwrites_empty_environment_values(monkeypatch, tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("TENCENT_DOC_ACCESS_TOKEN=from_file\n", encoding="utf-8")
+    monkeypatch.setenv("TENCENT_DOC_ACCESS_TOKEN", "")
+
+    api._load_env_file(env_file)
+
+    assert os.environ["TENCENT_DOC_ACCESS_TOKEN"] == "from_file"
+
+
+def test_tencent_doc_headers_use_app_config_not_environment(monkeypatch) -> None:
+    class ConfigCursor:
+        def __enter__(self) -> "ConfigCursor":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def execute(self, _sql: str, _params: tuple[Any, ...] = ()) -> None:
+            return None
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return [
+                {"config_key": "TENCENT_DOC_ACCESS_TOKEN", "config_value": "db-token"},
+                {"config_key": "TENCENT_DOC_CLIENT_ID", "config_value": "db-client"},
+                {"config_key": "TENCENT_DOC_OPEN_ID", "config_value": "db-open"},
+            ]
+
+    class ConfigConnection:
+        def __enter__(self) -> "ConfigConnection":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def cursor(self) -> ConfigCursor:
+            return ConfigCursor()
+
+    monkeypatch.setenv("TENCENT_DOC_ACCESS_TOKEN", "env-token")
+    monkeypatch.setenv("TENCENT_DOC_CLIENT_ID", "env-client")
+    monkeypatch.setenv("TENCENT_DOC_OPEN_ID", "env-open")
+    monkeypatch.setattr(api, "_connect", lambda: ConfigConnection())
+
+    headers = api._tencent_doc_headers()
+
+    assert headers["Access-Token"] == "db-token"
+    assert headers["Client-Id"] == "db-client"
+    assert headers["Open-Id"] == "db-open"
+
+
+def test_kol_read_count_fill_updates_internal_licaitong_rows(monkeypatch) -> None:
+    connection = KolReadFillConnection()
+    monkeypatch.setattr(api, "_connect", lambda: connection)
+    client = TestClient(api.create_app())
+
+    response = client.post(
+        "/api/kol-metrics/fill-read-count",
+        json={
+            "rows": [
+                {"日期": "2026-07-20", "账号名称": "acct", "T文章阅读数": "888"},
+                {"日期": "2026-07-20", "账号名称": "empty", "T文章阅读数": ""},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["platform"] == "理财通"
+    assert body["kol_type"] == "内部"
+    assert body["source_rows"] == 2
+    assert body["valid_rows"] == 1
+    assert body["empty_read_rows"] == 1
+    assert body["matched_count"] == 1
+    assert body["updated_count"] == 1
+    assert connection.updates == [(888, "2026-07-20", "acct", "理财通", "内部")]
+    assert connection.committed is True
+
+
+def test_settlement_import_preserves_zero_engagement_metrics() -> None:
     row = api._normalize_settlement_row(
         {
             "日期": "2026-07-01",
@@ -452,9 +643,9 @@ def test_settlement_import_treats_zero_autofill_values_as_empty() -> None:
     assert row["fans_count"] is None
     assert row["article_title"] == ""
     assert row["screenshot_url"] == ""
-    assert row["read_count"] is None
-    assert row["comment_count"] is None
-    assert row["like_count"] is None
+    assert row["read_count"] == 0
+    assert row["comment_count"] == 0
+    assert row["like_count"] == 0
 
 
 def test_settlement_import_treats_machine_recognition_labels_as_empty() -> None:
@@ -521,9 +712,9 @@ def test_settlement_import_update_sql_does_not_overwrite_autofill_with_zero() ->
     assert "VALUES(screenshot_url) IS NULL OR VALUES(screenshot_url) = '' OR VALUES(screenshot_url) = '0'" in sql
     assert "VALUES(article_title) LIKE CONCAT(CHAR(37), '机器识别', CHAR(37))" in sql
     assert "VALUES(screenshot_url) LIKE CONCAT(CHAR(37), '最好程序能帮填写', CHAR(37))" in sql
-    assert "VALUES(read_count) IS NULL OR VALUES(read_count) = 0" in sql
-    assert "VALUES(comment_count) IS NULL OR VALUES(comment_count) = 0" in sql
-    assert "VALUES(like_count) IS NULL OR VALUES(like_count) = 0" in sql
+    assert "read_count = COALESCE(VALUES(read_count), read_count)" in sql
+    assert "comment_count = COALESCE(VALUES(comment_count), comment_count)" in sql
+    assert "like_count = COALESCE(VALUES(like_count), like_count)" in sql
     assert "fee = COALESCE(VALUES(fee), fee)" in sql
 
 

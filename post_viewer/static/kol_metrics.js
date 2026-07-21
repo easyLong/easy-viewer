@@ -156,6 +156,17 @@
     return body;
   }
 
+  async function postJson(path, payload = {}) {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.detail || response.statusText);
+    return body;
+  }
+
   function renderFilters() {
     const payload = state.payload || {};
     const options = payload.options || {};
@@ -266,6 +277,32 @@
     window.location.href = apiUrl("/api/kol-metrics/export.xlsx");
   }
 
+  async function fillReadCount() {
+    const button = $("#kolMetricsFillReadButton");
+    const oldText = button?.textContent || "补充阅读数";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "补充中...";
+    }
+    $("#kolMetricsSourceLine").textContent = "正在从腾讯文档补充阅读数...";
+    try {
+      const result = await postJson("/api/kol-metrics/fill-read-count");
+      await loadKolMetrics();
+      $("#kolMetricsSourceLine").textContent = [
+        `补充阅读数完成 ${result.kol_type || ""}/${result.platform || ""}`,
+        `有效 ${numberText(result.valid_rows || 0)}`,
+        `匹配 ${numberText(result.matched_count || 0)}`,
+        `更新 ${numberText(result.updated_count || 0)}`,
+        `跳过空值 ${numberText(result.empty_read_rows || 0)}`,
+      ].join(" / ");
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = oldText;
+      }
+    }
+  }
+
   function bindEvents() {
     const filterIds = ["#kolPlatformSelect", "#kolTypeSelect", "#kolMissingSelect", "#kolSortSelect", "#kolLimitInput"];
     for (const selector of filterIds) {
@@ -311,6 +348,7 @@
     });
     $("#kolMetricsCopyButton")?.addEventListener("click", () => copyTable().catch(renderError));
     $("#kolMetricsExportButton")?.addEventListener("click", downloadExcel);
+    $("#kolMetricsFillReadButton")?.addEventListener("click", () => fillReadCount().catch(renderError));
   }
 
   readFiltersFromUrl();

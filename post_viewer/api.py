@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import html as html_lib
 import csv
 import io
 import os
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from datetime import date, datetime, timedelta
 from xml.etree import ElementTree as ET
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import FastAPI, File, HTTPException, Query, Request as FastAPIRequest, UploadFile
@@ -32,6 +33,9 @@ KOL_DAILY_METRICS_TABLE = "crawler_app.kol_daily_metrics"
 KOL_BASE_PROFILE_TABLE = "crawler_app.kol_base_profiles"
 ALIPAY_HOT_FUND_RANKINGS_TABLE = "crawler_app.alipay_hot_fund_rankings"
 KOL_MAX_LIMIT = 2000
+KOL_READ_SOURCE_DEFAULT_URL = "https://docs.qq.com/sheet/DYnBmZ2drS3B2QVRZ?tab=BB08J2"
+KOL_READ_SOURCE_PLATFORM = "理财通"
+KOL_READ_SOURCE_TYPE = "内部"
 KOL_SORT_OPTIONS = {
     "base_id": "CASE WHEN b.id IS NULL THEN 1 ELSE 0 END, b.id ASC, m.metric_date DESC, m.platform ASC, m.kol_name ASC",
     "title": "m.kol_name ASC, m.metric_date DESC",
@@ -64,27 +68,27 @@ def _capture_mounts() -> list[tuple[str, Path]]:
         configured_paths = [Path(item.strip()) for item in configured.split(os.pathsep) if item.strip()]
         candidates.extend((f"/captures-extra-{index}" if index > 1 else "/captures", path) for index, path in enumerate(configured_paths, start=1))
     root = _viewer_root()
+    finance_captures = root.parent / "adb" / "apps" / "finance_crawler" / "captures"
     candidates.extend(
         [
             ("/captures", root / "captures"),
-            ("/captures-adb-finance", root.parent / "adb" / "apps" / "finance_crawler" / "captures"),
+            ("/captures", finance_captures),
+            ("/captures-adb-finance", finance_captures),
             ("/captures-adb-runtime", root.parent / "adb" / "runtime" / "captures"),
             ("/captures-adb-tmp", root.parent / "adb" / "tmp"),
             ("/captures-adb-exports", root.parent / "adb" / "exports"),
         ]
     )
     mounts: list[tuple[str, Path]] = []
-    seen_paths: set[Path] = set()
     seen_mounts: set[str] = set()
     for mount_path, path in candidates:
         try:
             resolved = path.resolve()
-            if not path.exists() or not path.is_dir() or resolved in seen_paths:
+            if not path.exists() or not path.is_dir():
                 continue
             if mount_path in seen_mounts:
                 mount_path = f"{mount_path}-{len(seen_mounts) + 1}"
             mounts.append((mount_path, path))
-            seen_paths.add(resolved)
             seen_mounts.add(mount_path)
         except OSError:
             continue
@@ -123,7 +127,8 @@ def _load_env_file(path: Path) -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+        if not os.environ.get(key):
+            os.environ[key] = value
 
 
 def _load_default_env() -> None:
@@ -846,6 +851,7 @@ SETTLEMENT_DB_COLUMNS = [
 ]
 SETTLEMENT_NUMERIC_DB_COLUMNS = {"fans_count", "fee", "creator_fee", "buy_amount", "read_count", "comment_count", "like_count"}
 SETTLEMENT_AUTOFILL_DB_COLUMNS = {"fans_count", "article_title", "screenshot_url", "read_count", "comment_count", "like_count"}
+SETTLEMENT_ZERO_AS_EMPTY_NUMERIC_COLUMNS = {"fans_count"}
 SETTLEMENT_TEXT_PLACEHOLDERS = ("0", "机器识别", "自动识别", "程序识别", "待识别", "最好程序能帮填写")
 
 
@@ -928,8 +934,10 @@ def _settlement_import_update_sql(columns: list[str]) -> str:
         if placeholder != "0"
     )
     for column in columns:
-        if column in SETTLEMENT_AUTOFILL_DB_COLUMNS and column in SETTLEMENT_NUMERIC_DB_COLUMNS:
+        if column in SETTLEMENT_AUTOFILL_DB_COLUMNS and column in SETTLEMENT_ZERO_AS_EMPTY_NUMERIC_COLUMNS:
             assignments.append(f"{column} = CASE WHEN VALUES({column}) IS NULL OR VALUES({column}) = 0 THEN {column} ELSE VALUES({column}) END")
+        elif column in SETTLEMENT_AUTOFILL_DB_COLUMNS and column in SETTLEMENT_NUMERIC_DB_COLUMNS:
+            assignments.append(f"{column} = COALESCE(VALUES({column}), {column})")
         elif column in SETTLEMENT_AUTOFILL_DB_COLUMNS:
             placeholder_sql = text_placeholder_sql.format(column=column)
             assignments.append(f"{column} = CASE WHEN VALUES({column}) IS NULL OR VALUES({column}) = '' OR VALUES({column}) = '0' OR {placeholder_sql} THEN {column} ELSE VALUES({column}) END")
@@ -1204,8 +1212,11 @@ def _normalize_settlement_row(raw: dict[str, Any]) -> dict[str, Any]:
         "notes": _clean_text(_first_non_empty_value(raw.get("notes"), raw.get("备注"))),
         "source_payload_json": json.dumps(raw, ensure_ascii=False, default=str),
     }
-    for metric_column in ("fans_count", "read_count", "comment_count", "like_count"):
+    for metric_column in ("fans_count",):
         if normalized[metric_column] is not None and normalized[metric_column] <= 0:
+            normalized[metric_column] = None
+    for metric_column in ("read_count", "comment_count", "like_count"):
+        if normalized[metric_column] is not None and normalized[metric_column] < 0:
             normalized[metric_column] = None
     for text_column in ("article_title", "screenshot_url"):
         if _is_settlement_text_placeholder(normalized[text_column]):
@@ -1827,6 +1838,482 @@ def _kol_metrics_payload(params: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _kol_read_source_url(value: Any = None) -> str:
+    _load_default_env()
+    return _clean_text(value) or os.environ.get("KOL_READ_SOURCE_URL", "").strip() or KOL_READ_SOURCE_DEFAULT_URL
+
+
+def _kol_read_field_from_header(header: Any) -> str:
+    text = _compact_header(header)
+    if not text:
+        return ""
+    if "日期" in text:
+        return "metric_date"
+    if text in {"账号名称", "大V名称", "Title/大V名称", "Title大V名称"} or ("大V名称" in text) or text == "Title":
+        return "kol_name"
+    if "T-1日文章阅读数" in text or "T文章阅读数" in text or text in {"阅读数", "文章阅读数"}:
+        return "read_count"
+    if "标题" in text:
+        return "article_title"
+    return ""
+
+
+def _kol_read_date_text(value: Any) -> str:
+    text = _clean_text(value).replace("/", "-").replace(".", "-")
+    if not text:
+        raise ValueError("缺少日期")
+    short_match = re.fullmatch(r"(\d{2})(\d{2})", text)
+    if short_match:
+        year = datetime.now().year
+        return f"{year:04d}-{int(short_match.group(1)):02d}-{int(short_match.group(2)):02d}"
+    try:
+        return _clean_date(text)
+    except ValueError:
+        match = re.fullmatch(r"(\d{1,2})-(\d{1,2})", text)
+        if not match:
+            raise
+        year = datetime.now().year
+        return f"{year:04d}-{int(match.group(1)):02d}-{int(match.group(2)):02d}"
+
+
+def _kol_read_rows_from_matrix(matrix: list[list[Any]]) -> list[dict[str, Any]]:
+    for header_index, row in enumerate(matrix[:30]):
+        fields = [_kol_read_field_from_header(item) for item in row]
+        if {"metric_date", "kol_name", "read_count"}.issubset(set(fields)):
+            indexes = {field: fields.index(field) for field in ("metric_date", "kol_name", "read_count")}
+            title_index = fields.index("article_title") if "article_title" in fields else None
+            parsed_rows: list[dict[str, Any]] = []
+            last_metric_date: Any = ""
+            for data_row in matrix[header_index + 1 :]:
+                if not any(_clean_text(item) for item in data_row):
+                    continue
+                parsed_row = {field: data_row[index] if index < len(data_row) else "" for field, index in indexes.items()}
+                if _clean_text(parsed_row.get("metric_date")):
+                    last_metric_date = parsed_row.get("metric_date")
+                if not _clean_text(parsed_row.get("metric_date")) and title_index is not None and title_index < len(data_row):
+                    title_date = _kol_read_date_from_title(data_row[title_index])
+                    if title_date:
+                        parsed_row["metric_date"] = title_date
+                        last_metric_date = title_date
+                if not _clean_text(parsed_row.get("metric_date")) and last_metric_date:
+                    parsed_row["metric_date"] = last_metric_date
+                parsed_rows.append(parsed_row)
+            _fill_missing_kol_read_dates(parsed_rows)
+            return parsed_rows
+    return []
+
+
+def _kol_read_default_date(value: Any) -> str:
+    try:
+        return _kol_read_date_text(value)
+    except ValueError:
+        return ""
+
+
+def _kol_read_date_from_title(value: Any) -> str:
+    text = _clean_text(value)
+    patterns = [
+        r"(?<!\d)(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})(?:日)?",
+        r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*日",
+        r"(?<!\d)(\d{2})(\d{2})(?!\d)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        groups = match.groups()
+        try:
+            if len(groups) == 3:
+                parsed = date(int(groups[0]), int(groups[1]), int(groups[2]))
+            else:
+                parsed = date(datetime.now().year, int(groups[0]), int(groups[1]))
+            return parsed.isoformat()
+        except ValueError:
+            continue
+    return ""
+
+
+def _fill_missing_kol_read_dates(rows: list[dict[str, Any]]) -> None:
+    next_date = ""
+    for row in reversed(rows):
+        current = _clean_text(row.get("metric_date"))
+        if current:
+            next_date = current
+        elif next_date:
+            row["metric_date"] = next_date
+    last_date = ""
+    for row in rows:
+        current = _clean_text(row.get("metric_date"))
+        if current:
+            last_date = current
+        elif last_date:
+            row["metric_date"] = last_date
+
+
+def _parse_kol_read_source_text(text: str) -> list[dict[str, Any]]:
+    clean = html_lib.unescape(str(text or "").lstrip("\ufeff"))
+    candidates: list[list[list[Any]]] = []
+    if "\t" in clean:
+        candidates.append(list(csv.reader(io.StringIO(clean), delimiter="\t")))
+    try:
+        dialect = csv.Sniffer().sniff(clean[:4096])
+        candidates.append(list(csv.reader(io.StringIO(clean), dialect)))
+    except csv.Error:
+        candidates.append(list(csv.reader(io.StringIO(clean))))
+    for matrix in candidates:
+        rows = _kol_read_rows_from_matrix(matrix)
+        if rows:
+            return rows
+    return []
+
+
+def _json_from_jsonp(text: str) -> Any:
+    clean = html_lib.unescape(str(text or "").strip())
+    match = re.match(r"^[\w$.\[\]]+\((.*)\)\s*;?$", clean, re.S)
+    if match:
+        clean = match.group(1)
+    return json.loads(clean)
+
+
+def _walk_values(value: Any) -> list[Any]:
+    values: list[Any] = []
+    if isinstance(value, dict):
+        for item in value.values():
+            values.append(item)
+            values.extend(_walk_values(item))
+    elif isinstance(value, list):
+        for item in value:
+            values.append(item)
+            values.extend(_walk_values(item))
+    return values
+
+
+def _first_kol_read_table_text(payload: Any) -> str:
+    for value in _walk_values(payload):
+        if isinstance(value, str) and "T文章阅读数" in value and "账号名称" in value:
+            return value
+    return ""
+
+
+def _fetch_url_text(url: str, timeout: int = 25, headers: dict[str, str] | None = None) -> str:
+    request_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) easy-viewer/1.0",
+        "Accept": "text/html,application/json,text/plain,*/*",
+    }
+    request_headers.update(headers or {})
+    request = UrlRequest(
+        url,
+        headers=request_headers,
+    )
+    with urlopen(request, timeout=timeout) as response:
+        content = response.read()
+        charset = response.headers.get_content_charset() or "utf-8"
+    return content.decode(charset, errors="replace")
+
+
+def _tencent_doc_headers() -> dict[str, str]:
+    _load_default_env()
+    config = _load_tencent_doc_config_from_app_config()
+    access_token = config.get("TENCENT_DOC_ACCESS_TOKEN", "").strip()
+    client_id = config.get("TENCENT_DOC_CLIENT_ID", "").strip()
+    open_id = config.get("TENCENT_DOC_OPEN_ID", "").strip()
+    if not (access_token and client_id and open_id):
+        return {}
+    return {
+        "Access-Token": access_token,
+        "Client-Id": client_id,
+        "Open-Id": open_id,
+        "Content-Type": "application/json",
+    }
+
+
+def _load_tencent_doc_config_from_app_config() -> dict[str, str]:
+    keys = ("TENCENT_DOC_ACCESS_TOKEN", "TENCENT_DOC_CLIENT_ID", "TENCENT_DOC_OPEN_ID")
+    try:
+        with _connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT config_key, config_value
+                    FROM crawler_app.app_config
+                    WHERE status = 'active'
+                      AND config_key IN (%s, %s, %s)
+                      AND config_value IS NOT NULL
+                      AND config_value <> ''
+                    """,
+                    keys,
+                )
+                rows = cursor.fetchall()
+    except Exception:
+        return {}
+    return {
+        str(row.get("config_key") or ""): str(row.get("config_value") or "")
+        for row in rows
+        if str(row.get("config_key") or "") in keys
+    }
+
+
+def _tencent_openapi_json(path_or_url: str) -> Any:
+    headers = _tencent_doc_headers()
+    if not headers:
+        raise ValueError("缺少腾讯文档 OpenAPI 配置")
+    url = path_or_url if path_or_url.startswith("http") else f"https://docs.qq.com{path_or_url}"
+    request = UrlRequest(url, headers={**headers, "Accept": "application/json"})
+    with urlopen(request, timeout=30) as response:
+        content = response.read()
+    payload = _json_from_jsonp(content.decode("utf-8", errors="replace"))
+    if isinstance(payload, dict):
+        code = payload.get("code", payload.get("ret", 0))
+        if code not in (0, "0", None):
+            raise ValueError(str(payload.get("message") or payload.get("msg") or "腾讯文档 OpenAPI 请求失败"))
+    return payload
+
+
+def _qq_docs_id_and_tab(source_url: str) -> tuple[str, str]:
+    parsed = urlparse(source_url)
+    parts = [part for part in parsed.path.split("/") if part]
+    doc_id = parts[-1] if parts else ""
+    tab = (parse_qs(parsed.query).get("tab") or [""])[0]
+    return doc_id, tab
+
+
+def _matrix_from_payload(value: Any) -> list[list[Any]]:
+    if isinstance(value, dict) and isinstance(value.get("gridData"), dict):
+        matrix: list[list[Any]] = []
+        for row in value["gridData"].get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            matrix.append([_tencent_cell_text(cell) for cell in row.get("values") or []])
+        return matrix
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"values", "cellValues", "data"} and isinstance(item, list) and all(isinstance(row, list) for row in item):
+                return item
+        for item in value.values():
+            matrix = _matrix_from_payload(item)
+            if matrix:
+                return matrix
+    elif isinstance(value, list):
+        if value and all(isinstance(row, list) for row in value):
+            return value
+        for item in value:
+            matrix = _matrix_from_payload(item)
+            if matrix:
+                return matrix
+    return []
+
+
+def _tencent_cell_text(cell: Any) -> Any:
+    if not isinstance(cell, dict):
+        return ""
+    value = cell.get("cellValue")
+    if value is None:
+        return ""
+    if not isinstance(value, dict):
+        return value
+    for key in ("text", "number", "formula", "boolValue"):
+        if value.get(key) is not None:
+            return value.get(key)
+    time_value = value.get("time")
+    if isinstance(time_value, dict):
+        try:
+            year = int(time_value.get("year") or 0)
+            month = int(time_value.get("month") or 0)
+            day = int(time_value.get("day") or 0)
+            if year and month and day:
+                return date(year, month, day).isoformat()
+        except (TypeError, ValueError):
+            return ""
+    rich_text = value.get("richText")
+    if isinstance(rich_text, list):
+        return "".join(str(item.get("text") or "") for item in rich_text if isinstance(item, dict))
+    return ""
+
+
+def _text_values_from_payload(value: Any) -> list[str]:
+    items: list[str] = []
+    if isinstance(value, dict):
+        for item in value.values():
+            items.extend(_text_values_from_payload(item))
+    elif isinstance(value, list):
+        for item in value:
+            items.extend(_text_values_from_payload(item))
+    elif isinstance(value, str):
+        items.append(value)
+    return items
+
+
+def _tencent_sheet_values_rows(source_url: str) -> list[dict[str, Any]]:
+    doc_id, tab = _qq_docs_id_and_tab(source_url)
+    if not doc_id or not tab:
+        raise ValueError("腾讯文档链接缺少 fileId 或 tab")
+    if not _tencent_doc_headers():
+        return []
+    metadata = _tencent_openapi_json(f"/openapi/spreadsheet/v3/files/{doc_id}?concise=1")
+    sheets = metadata.get("properties") or [] if isinstance(metadata, dict) else []
+    sheet = next((item for item in sheets if str(item.get("sheetId") or "") == tab), None)
+    row_total = min(max(int((sheet or {}).get("rowTotal") or 1000), 1), 5000)
+    column_total = min(max(int((sheet or {}).get("columnTotal") or 26), 1), 26)
+    end_column = chr(ord("A") + column_total - 1)
+    range_name = os.environ.get("KOL_READ_SOURCE_RANGE", "").strip() or f"A1:{end_column}{row_total}"
+    payload = _tencent_openapi_json(f"/openapi/spreadsheet/v3/files/{doc_id}/{tab}/{quote(range_name, safe=':')}")
+    rows = _kol_read_rows_from_matrix(_matrix_from_payload(payload))
+    if rows:
+        return rows
+    return []
+
+
+def _fetch_qq_docs_sheet_text(source_url: str) -> str:
+    doc_id, tab = _qq_docs_id_and_tab(source_url)
+    if not doc_id:
+        raise ValueError("腾讯文档链接缺少文档 ID")
+    html = _fetch_url_text(source_url)
+    token_match = re.search(r"[?&]t=(\d+)", html) or re.search(r'"t"\s*:\s*"?(\d+)"?', html)
+    params = {
+        "id": doc_id,
+        "normal": "1",
+        "outformat": "1",
+        "startrow": "0",
+        "endrow": "5000",
+        "callback": "easyViewerCallback",
+    }
+    if tab:
+        params["tab"] = tab
+    if token_match:
+        params["t"] = token_match.group(1)
+    payload = _json_from_jsonp(_fetch_url_text(f"https://docs.qq.com/dop-api/opendoc?{urlencode(params)}"))
+    table_text = _first_kol_read_table_text(payload)
+    if table_text:
+        return table_text
+    raise ValueError("未能从腾讯文档响应中识别表格内容")
+
+
+def _fetch_kol_read_source_rows(source_url: str) -> list[dict[str, Any]]:
+    parsed = urlparse(source_url)
+    if parsed.netloc.endswith("docs.qq.com") and "/sheet/" in parsed.path:
+        rows = _tencent_sheet_values_rows(source_url)
+        if rows:
+            return rows
+        try:
+            rows = _parse_kol_read_source_text(_fetch_qq_docs_sheet_text(source_url))
+            if rows:
+                return rows
+        except Exception:
+            pass
+    rows = _parse_kol_read_source_text(_fetch_url_text(source_url))
+    if not rows:
+        raise ValueError("来源中没有识别到 日期 / 账号名称 / T文章阅读数 三列")
+    return rows
+
+
+def _normalize_kol_read_source_rows(rows: Any, default_date: Any = None) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    if not isinstance(rows, list):
+        raise ValueError("补充阅读数来源为空")
+    normalized: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    stats = {"source_rows": len(rows), "valid_rows": 0, "empty_read_rows": 0, "invalid_rows": 0, "duplicate_rows": 0, "out_of_range_rows": 0}
+    fallback_date = _kol_read_default_date(default_date)
+    lookback_days = _parse_int(os.environ.get("KOL_READ_SYNC_LOOKBACK_DAYS"), 183) or 183
+    min_metric_date = date.today() - timedelta(days=max(lookback_days, 1))
+    for raw in rows:
+        row = raw if isinstance(raw, dict) else {}
+        metric_date = _first_non_empty_value(row.get("metric_date"), row.get("date"), row.get("日期"), fallback_date)
+        kol_name = _first_non_empty_value(row.get("kol_name"), row.get("account_name"), row.get("账号名称"), row.get("Title/大V名称"), row.get("大V名称"))
+        read_count = _first_non_empty_value(row.get("read_count"), row.get("T文章阅读数"), row.get("阅读数"))
+        read_number = _clean_int(read_count)
+        if read_number is None:
+            stats["empty_read_rows"] += 1
+            continue
+        try:
+            date_text = _kol_read_date_text(metric_date)
+        except ValueError:
+            stats["invalid_rows"] += 1
+            continue
+        metric_date_value = _parse_date(date_text)
+        if metric_date_value and metric_date_value < min_metric_date:
+            stats["out_of_range_rows"] += 1
+            continue
+        name_text = _clean_text(kol_name)
+        if not name_text:
+            stats["invalid_rows"] += 1
+            continue
+        key = (date_text, name_text, KOL_READ_SOURCE_PLATFORM, KOL_READ_SOURCE_TYPE)
+        if key in normalized:
+            stats["duplicate_rows"] += 1
+            normalized[key]["read_count"] += read_number
+        else:
+            normalized[key] = {
+                "metric_date": date_text,
+                "kol_name": name_text,
+                "platform": KOL_READ_SOURCE_PLATFORM,
+                "kol_type": KOL_READ_SOURCE_TYPE,
+                "read_count": read_number,
+            }
+    stats["valid_rows"] = len(normalized)
+    return list(normalized.values()), stats
+
+
+def _fill_kol_read_count_payload(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    source_url = _kol_read_source_url(payload.get("source_url"))
+    raw_rows = payload.get("rows")
+    if raw_rows is None:
+        raw_rows = _fetch_kol_read_source_rows(source_url)
+    default_date = payload.get("date")
+    if isinstance(default_date, str) and "," in default_date:
+        default_date = ""
+    rows, stats = _normalize_kol_read_source_rows(raw_rows, default_date)
+    matched_count = 0
+    updated_count = 0
+    with _connect() as connection:
+        with connection.cursor() as cursor:
+            for row in rows:
+                cursor.execute(
+                    f"""
+                    SELECT COUNT(*) AS matched_rows
+                    FROM {KOL_DAILY_METRICS_TABLE} AS m
+                    JOIN {KOL_BASE_PROFILE_TABLE} AS b
+                      ON b.kol_name = m.kol_name
+                     AND b.platform = m.platform
+                    WHERE m.metric_date = %s
+                      AND m.kol_name = %s
+                      AND m.platform = %s
+                      AND COALESCE(NULLIF(b.kol_type, ''), '未匹配') = %s
+                    """,
+                    (row["metric_date"], row["kol_name"], row["platform"], row["kol_type"]),
+                )
+                matched_count += int((cursor.fetchone() or {}).get("matched_rows") or 0)
+                cursor.execute(
+                    f"""
+                    UPDATE {KOL_DAILY_METRICS_TABLE} AS m
+                    JOIN {KOL_BASE_PROFILE_TABLE} AS b
+                      ON b.kol_name = m.kol_name
+                     AND b.platform = m.platform
+                    SET m.read_count = %s,
+                        m.updated_at = CURRENT_TIMESTAMP
+                    WHERE m.metric_date = %s
+                      AND m.kol_name = %s
+                      AND m.platform = %s
+                      AND COALESCE(NULLIF(b.kol_type, ''), '未匹配') = %s
+                    """,
+                    (row["read_count"], row["metric_date"], row["kol_name"], row["platform"], row["kol_type"]),
+                )
+                updated_count += int(getattr(cursor, "rowcount", 0) or 0)
+        connection.commit()
+    return {
+        "source": source_url,
+        "platform": KOL_READ_SOURCE_PLATFORM,
+        "kol_type": KOL_READ_SOURCE_TYPE,
+        "source_rows": stats["source_rows"],
+        "valid_rows": stats["valid_rows"],
+        "empty_read_rows": stats["empty_read_rows"],
+        "invalid_rows": stats["invalid_rows"],
+        "duplicate_rows": stats["duplicate_rows"],
+        "out_of_range_rows": stats["out_of_range_rows"],
+        "matched_count": matched_count,
+        "updated_count": updated_count,
+    }
+
+
 def _kol_excel_value(value: Any) -> Any:
     return "" if value is None else value
 
@@ -2147,6 +2634,15 @@ def create_app() -> FastAPI:
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    @app.post("/api/kol-metrics/fill-read-count")
+    def kol_metrics_fill_read_count(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            return _fill_kol_read_count_payload(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
     @app.get("/api/hot-funds")
     def hot_funds(

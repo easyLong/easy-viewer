@@ -54,6 +54,7 @@
     endDate: "",
     partner: "",
     deliveryPlatform: "",
+    kolType: "",
     ipName: "",
     missing: "",
     sort: "date_desc",
@@ -409,6 +410,7 @@
       if (filters.endDate && row.date > filters.endDate) return false;
       if (filters.partner && row.partner !== filters.partner) return false;
       if (filters.deliveryPlatform && row.deliveryPlatform !== filters.deliveryPlatform) return false;
+      if (filters.kolType && row.kolType !== filters.kolType) return false;
       if (filters.ipName && row.ipName !== filters.ipName) return false;
       return matchesMissingFilter(row);
     });
@@ -430,6 +432,7 @@
     const configs = [
       ["#settlementPartnerSelect", "partner", "partner", "全部合作方"],
       ["#settlementDeliveryPlatformSelect", "deliveryPlatform", "deliveryPlatform", "全部投放平台"],
+      ["#settlementKolTypeSelect", "kolType", "kolType", "全部内外部"],
       ["#settlementIpNameSelect", "ipName", "ipName", "全部 IP"],
     ];
     for (const [selector, filterKey, field, allLabel] of configs) {
@@ -650,6 +653,10 @@
     });
     document.querySelector("#settlementDeliveryPlatformSelect").addEventListener("change", (event) => {
       filters.deliveryPlatform = event.target.value || "";
+      render();
+    });
+    document.querySelector("#settlementKolTypeSelect").addEventListener("change", (event) => {
+      filters.kolType = event.target.value || "";
       render();
     });
     document.querySelector("#settlementIpNameSelect").addEventListener("change", (event) => {
