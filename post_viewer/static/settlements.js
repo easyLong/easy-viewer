@@ -22,6 +22,7 @@
     "notes",
   ];
   const numericFields = new Set(["fansCount", "fee", "creatorFee", "buyAmount", "readCount", "commentCount", "likeCount"]);
+  const editableMetricFields = new Set(["commentCount", "likeCount"]);
   const headerLabels = {
     date: "日期",
     partner: "合作方",
@@ -134,6 +135,25 @@
     return escapeHtml(value);
   }
 
+  function editableMetricInput(row, field) {
+    const rawValue = isEmpty(row[field]) ? "" : String(row[field]);
+    return `
+      <input
+        class="settlement-edit-input"
+        type="text"
+        inputmode="numeric"
+        pattern="[0-9]*"
+        data-settlement-editable="1"
+        data-row-id="${escapeHtml(row.id || "")}"
+        data-field="${escapeHtml(field)}"
+        data-original="${escapeHtml(rawValue)}"
+        value="${escapeHtml(rawValue)}"
+        placeholder="NULL"
+        aria-label="${escapeHtml(headerLabels[field] || field)}"
+      />
+    `;
+  }
+
   function statusClass(value) {
     if (String(value || "").includes("已")) return "done";
     if (String(value || "").includes("未")) return "todo";
@@ -143,8 +163,10 @@
   function cell(row, field) {
     const classNames = ["mysql-cell"];
     if (numericFields.has(field)) classNames.push("mysql-number");
+    if (editableMetricFields.has(field)) classNames.push("mysql-editable");
     if (field === "link" || field === "articleTitle" || field === "screenshot" || field === "notes") classNames.push("mysql-wide");
     if (field === "partnerPaymentStatus" || field === "creatorSettlementStatus") classNames.push(`mysql-status-${statusClass(row[field])}`);
+    if (editableMetricFields.has(field)) return `<td class="${classNames.join(" ")}">${editableMetricInput(row, field)}</td>`;
     return `<td class="${classNames.join(" ")}">${displayValue(row, field)}</td>`;
   }
 
@@ -569,6 +591,57 @@
     renderSummary(filteredRows(), `同步粉丝数：匹配 ${body.matched_count || 0} 行，覆盖 ${body.updated_count || 0} 行，未匹配 ${body.unmatched_count || 0} 行`);
   }
 
+  function normalizeEditableMetricValue(input) {
+    const value = String(input.value || "").trim();
+    if (!value) return "";
+    if (!/^\d+$/.test(value)) throw new Error("评论和点赞必须是非负整数");
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 0) {
+      throw new Error("评论和点赞必须是非负整数");
+    }
+    return String(number);
+  }
+
+  async function saveEditableMetric(input) {
+    if (!input || input.dataset.saving === "1") return;
+    const original = input.dataset.original || "";
+    let value = "";
+    try {
+      value = normalizeEditableMetricValue(input);
+    } catch (error) {
+      input.value = original;
+      renderSummary(filteredRows(), error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (value === original) return;
+
+    input.dataset.saving = "1";
+    input.disabled = true;
+    input.closest("td")?.classList.add("mysql-editing");
+    try {
+      const response = await fetch("/api/settlements/update-engagement", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: input.dataset.rowId,
+          field: input.dataset.field,
+          value: value === "" ? null : value,
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || response.statusText);
+      setRows(body.rows || []);
+      render();
+      renderSummary(filteredRows(), `已更新 ${headerLabels[body.field] || "字段"}：${body.value || "NULL"}`);
+    } catch (error) {
+      input.disabled = false;
+      input.dataset.saving = "";
+      input.closest("td")?.classList.remove("mysql-editing");
+      input.value = original;
+      renderSummary(filteredRows(), error instanceof Error ? error.message : String(error));
+    }
+  }
+
   function statsExportRow(tableFields, summaryRows) {
     return tableFields.map((field, index) => {
       if (index === 0) return "SUM";
@@ -670,6 +743,27 @@
     document.querySelector("#settlementSortSelect").addEventListener("change", (event) => {
       filters.sort = event.target.value || "date_desc";
       render();
+    });
+
+    document.querySelector("#settlementTableBody").addEventListener("keydown", (event) => {
+      const input = event.target.closest?.(".settlement-edit-input");
+      if (!input) return;
+      if (event.key === "Enter") {
+        event.preventDefault();
+        input.blur();
+      }
+      if (event.key === "Escape") {
+        input.value = input.dataset.original || "";
+        input.blur();
+      }
+    });
+
+    document.querySelector("#settlementTableBody").addEventListener("change", (event) => {
+      const input = event.target.closest?.(".settlement-edit-input");
+      if (!input) return;
+      saveEditableMetric(input).catch((error) => {
+        document.querySelector("#settlementSourceLine").textContent = error instanceof Error ? error.message : String(error);
+      });
     });
   }
 

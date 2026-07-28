@@ -25,6 +25,7 @@ from openpyxl.utils import get_column_letter
 
 
 POST_TABLE = "t_fund_generated_posts"
+PUBLISH_TASK_TABLE = "post_supplement_lib.t_publish_tasks"
 DIMENSION_CATEGORY_TABLE = "t_content_dimension_categories"
 DIMENSION_OPTION_TABLE = "t_content_dimension_options"
 TASK_SUBMISSION_TABLE = "crawler_app.task_submissions"
@@ -425,6 +426,131 @@ def _posts_payload(*, trade_date: str = "", run_id: str = "", generated_at: str 
         "style_counts": style_counts,
         "posts": posts,
     }
+
+
+def _publish_task_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": str(row.get("task_id") or ""),
+        "date": _date_text(row.get("trade_date")),
+        "title": str(row.get("title") or ""),
+        "body": str(row.get("body") or ""),
+        "status": str(row.get("status") or ""),
+        "quality_score": "" if row.get("quality_score") is None else str(row.get("quality_score")),
+    }
+
+
+def _publish_task_latest_date(connection: Any) -> date | None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT trade_date
+            FROM {PUBLISH_TASK_TABLE}
+            WHERE source_type = %s
+              AND trade_date IS NOT NULL
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """,
+            ("content_item",),
+        )
+        row = cursor.fetchone() or {}
+    return _parse_date(row.get("trade_date"))
+
+
+def _publish_task_options(connection: Any) -> dict[str, Any]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT DISTINCT trade_date
+            FROM {PUBLISH_TASK_TABLE}
+            WHERE source_type = %s
+              AND trade_date IS NOT NULL
+            ORDER BY trade_date DESC
+            """,
+            ("content_item",),
+        )
+        dates = [_date_text(row.get("trade_date")) for row in cursor.fetchall()]
+    return {"dates": dates}
+
+
+def _publish_task_filters(params: dict[str, Any], connection: Any) -> dict[str, Any]:
+    limit = _parse_int(params.get("limit"), 200) or 200
+    trade_date = _parse_date(str(params.get("date") or params.get("trade_date") or "").strip())
+    if trade_date is None:
+        trade_date = _publish_task_latest_date(connection)
+    return {
+        "trade_date": trade_date,
+        "title": _clean_text(params.get("title") or params.get("q")),
+        "limit": min(max(limit, 1), 1000),
+    }
+
+
+def _publish_task_where_sql(filters: dict[str, Any]) -> tuple[str, list[Any]]:
+    clauses = ["source_type = %s"]
+    args: list[Any] = ["content_item"]
+    if filters["trade_date"]:
+        clauses.append("trade_date = %s")
+        args.append(filters["trade_date"])
+    if filters["title"]:
+        clauses.append("title LIKE %s")
+        args.append(f"%{filters['title']}%")
+    return "WHERE " + " AND ".join(clauses), args
+
+
+def _publish_task_rows(connection: Any, filters: dict[str, Any]) -> list[dict[str, Any]]:
+    where_sql, args = _publish_task_where_sql(filters)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT
+              task_id,
+              trade_date,
+              title,
+              body,
+              status,
+              quality_score
+            FROM {PUBLISH_TASK_TABLE}
+            {where_sql}
+            ORDER BY task_id DESC
+            LIMIT %s
+            """,
+            (*args, int(filters["limit"])),
+        )
+        return [_publish_task_row(row) for row in cursor.fetchall()]
+
+
+def _publish_task_summary(connection: Any, filters: dict[str, Any]) -> dict[str, int]:
+    where_sql, args = _publish_task_where_sql(filters)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT
+              COUNT(*) AS total_rows,
+              COUNT(DISTINCT trade_date) AS date_count,
+              COUNT(DISTINCT title) AS title_count
+            FROM {PUBLISH_TASK_TABLE}
+            {where_sql}
+            """,
+            args,
+        )
+        row = cursor.fetchone() or {}
+    return {key: int(value or 0) for key, value in row.items()}
+
+
+def _publish_tasks_payload(params: dict[str, Any]) -> dict[str, Any]:
+    with _connect() as connection:
+        filters = _publish_task_filters(params, connection)
+        rows = _publish_task_rows(connection, filters)
+        return {
+            "source": "mysql",
+            "table": PUBLISH_TASK_TABLE,
+            "filters": {
+                **filters,
+                "trade_date": _date_text(filters["trade_date"]),
+            },
+            "options": _publish_task_options(connection),
+            "summary": _publish_task_summary(connection, filters),
+            "rows": rows,
+        }
 
 
 def _batches_payload(limit: int = 30) -> list[dict[str, Any]]:
@@ -1241,6 +1367,59 @@ def _settlements_payload(limit: int = 500, request: FastAPIRequest | None = None
     return [_settlement_api_row(row, request) for row in rows]
 
 
+SETTLEMENT_EDITABLE_ENGAGEMENT_FIELDS = {
+    "commentCount": "comment_count",
+    "likeCount": "like_count",
+}
+
+
+def _settlement_edit_metric_value(value: Any) -> int | None:
+    if value is None or _clean_text(value) == "":
+        return None
+    number = _clean_int(value)
+    if number is None or number < 0:
+        raise ValueError("评论和点赞必须是非负整数，或留空")
+    return number
+
+
+def _update_settlement_engagement_payload(payload: dict[str, Any], request: FastAPIRequest | None = None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("缺少更新内容")
+    row_id = _parse_int(payload.get("id"))
+    if row_id is None or row_id <= 0:
+        raise ValueError("缺少有效记录 ID")
+
+    field = _clean_text(payload.get("field"))
+    if field not in SETTLEMENT_EDITABLE_ENGAGEMENT_FIELDS:
+        raise ValueError("只能修改评论或点赞")
+    column = SETTLEMENT_EDITABLE_ENGAGEMENT_FIELDS[field]
+    value = _settlement_edit_metric_value(payload.get("value"))
+
+    with _connect() as connection:
+        _ensure_settlement_table(connection)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                UPDATE {SETTLEMENT_TABLE}
+                SET {column} = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (value, row_id),
+            )
+            cursor.execute(f"SELECT id FROM {SETTLEMENT_TABLE} WHERE id = %s", (row_id,))
+            if not cursor.fetchone():
+                raise ValueError("记录不存在")
+        connection.commit()
+
+    return {
+        "updated_id": str(row_id),
+        "field": field,
+        "value": "" if value is None else str(value),
+        "rows": _settlements_payload(request=request),
+    }
+
+
 def _import_settlements_payload(rows_value: Any, request: FastAPIRequest | None = None) -> dict[str, Any]:
     if not isinstance(rows_value, list) or not rows_value:
         raise ValueError("没有可导入的数据")
@@ -1851,7 +2030,7 @@ def _kol_read_field_from_header(header: Any) -> str:
         return "metric_date"
     if text in {"账号名称", "大V名称", "Title/大V名称", "Title大V名称"} or ("大V名称" in text) or text == "Title":
         return "kol_name"
-    if "T-1日文章阅读数" in text or "T文章阅读数" in text or text in {"阅读数", "文章阅读数"}:
+    if "文章阅读数" in text or text in {"阅读数", "阅读量"}:
         return "read_count"
     if "标题" in text:
         return "article_title"
@@ -2321,9 +2500,11 @@ def _kol_excel_value(value: Any) -> Any:
 def _hot_fund_columns() -> list[tuple[str, str]]:
     return [
         ("日期", "snapshot_date"),
+        ("来源App", "source_app"),
         ("排名", "rank_no"),
         ("基金代码", "fund_code"),
         ("基金名称", "fund_name"),
+        ("近一年收益率", "change_text"),
         ("截图", "screenshot_url"),
     ]
 
@@ -2332,6 +2513,7 @@ def _hot_fund_normalize_filters(params: dict[str, Any]) -> dict[str, Any]:
     limit = _parse_int(params.get("limit"), 200) or 200
     return {
         "snapshot_date": _parse_date(str(params.get("date") or "").strip()),
+        "source_app": _clean_text(params.get("app") or params.get("source_app")),
         "limit": min(max(limit, 1), 1000),
     }
 
@@ -2346,7 +2528,17 @@ def _hot_fund_options(connection: Any) -> dict[str, Any]:
             """
         )
         dates = [_date_text(row.get("snapshot_date")) for row in cursor.fetchall()]
-    return {"dates": dates}
+        cursor.execute(
+            f"""
+            SELECT DISTINCT source_app
+            FROM {ALIPAY_HOT_FUND_RANKINGS_TABLE}
+            WHERE source_app IS NOT NULL
+              AND source_app <> ''
+            ORDER BY source_app
+            """
+        )
+        apps = [str(row.get("source_app") or "") for row in cursor.fetchall()]
+    return {"dates": dates, "apps": apps}
 
 
 def _hot_fund_filter_sql(filters: dict[str, Any]) -> tuple[str, list[Any]]:
@@ -2355,6 +2547,9 @@ def _hot_fund_filter_sql(filters: dict[str, Any]) -> tuple[str, list[Any]]:
     if filters["snapshot_date"]:
         clauses.append("snapshot_date = %s")
         args.append(filters["snapshot_date"])
+    if filters["source_app"]:
+        clauses.append("source_app = %s")
+        args.append(filters["source_app"])
     return ("WHERE " + " AND ".join(clauses), args) if clauses else ("", args)
 
 
@@ -2363,7 +2558,7 @@ def _hot_fund_rows(connection: Any, filters: dict[str, Any], request: FastAPIReq
     with connection.cursor() as cursor:
         cursor.execute(
             f"""
-            SELECT snapshot_date, rank_no, fund_code, fund_name, screenshot_path
+            SELECT snapshot_date, source_app, rank_no, fund_code, fund_name, change_text, screenshot_path
             FROM {ALIPAY_HOT_FUND_RANKINGS_TABLE}
             {where_sql}
             ORDER BY snapshot_date DESC, rank_no ASC
@@ -2377,9 +2572,11 @@ def _hot_fund_rows(connection: Any, filters: dict[str, Any], request: FastAPIReq
             rows.append(
                 {
                     "snapshot_date": _date_text(row.get("snapshot_date")),
+                    "source_app": str(row.get("source_app") or ""),
                     "rank_no": row.get("rank_no"),
                     "fund_code": str(row.get("fund_code") or ""),
                     "fund_name": str(row.get("fund_name") or ""),
+                    "change_text": str(row.get("change_text") or ""),
                     "screenshot_path": screenshot_path,
                     "screenshot_url": _externalize_local_url(screenshot_path, request),
                 }
@@ -2395,6 +2592,7 @@ def _hot_fund_summary(connection: Any, filters: dict[str, Any]) -> dict[str, int
             SELECT
                 COUNT(*) AS total_rows,
                 COUNT(DISTINCT snapshot_date) AS date_count,
+                COUNT(DISTINCT source_app) AS app_count,
                 SUM(screenshot_path IS NOT NULL AND screenshot_path <> '') AS screenshot_rows
             FROM {ALIPAY_HOT_FUND_RANKINGS_TABLE}
             {where_sql}
@@ -2494,6 +2692,10 @@ def create_app() -> FastAPI:
     def hot_funds_page() -> str:
         return (static_root / "index.html").read_text(encoding="utf-8")
 
+    @app.get("/post-production", response_class=HTMLResponse)
+    def post_production_page() -> str:
+        return (static_root / "index.html").read_text(encoding="utf-8")
+
     @app.get("/api/batches")
     def batches(limit: int = Query(default=30, ge=1, le=200)) -> list[dict[str, Any]]:
         try:
@@ -2512,6 +2714,13 @@ def create_app() -> FastAPI:
     def posts(trade_date: str = "", run_id: str = "", generated_at: str = "") -> dict[str, Any]:
         try:
             return _posts_payload(trade_date=trade_date.strip(), run_id=run_id.strip(), generated_at=generated_at.strip())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.get("/api/post-production")
+    def post_production(date: str = "", title: str = "", limit: int = Query(default=200, ge=1, le=1000)) -> dict[str, Any]:
+        try:
+            return _publish_tasks_payload({"date": date, "title": title, "limit": limit})
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
@@ -2549,6 +2758,15 @@ def create_app() -> FastAPI:
     def fill_settlement_fans_count(request: FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             return _fill_settlement_fans_count_payload(payload.get("ids"), request)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.post("/api/settlements/update-engagement")
+    def update_settlement_engagement(request: FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _update_settlement_engagement_payload(payload, request)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -2648,10 +2866,11 @@ def create_app() -> FastAPI:
     def hot_funds(
         request: FastAPIRequest,
         date: str = "",
+        app: str = "",
         limit: int = Query(default=200, ge=1, le=1000),
     ) -> dict[str, Any]:
         try:
-            return _hot_fund_rankings_payload({"date": date, "limit": limit}, request)
+            return _hot_fund_rankings_payload({"date": date, "app": app, "limit": limit}, request)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 

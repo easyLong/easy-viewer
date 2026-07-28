@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>easy-viewer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260713-kol-date-dropdown" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260722-hot-funds-filter-nowrap" />
   </head>
   <body>
     <main class="page">
@@ -23,10 +23,11 @@
           <span>页面</span>
           <select id="pageSelect">
             <option value="posts">小牛书社区内容生产</option>
+            <option value="postProduction">KOL帖子生产</option>
             <option value="rerun">重跑帖子阅读数</option>
             <option value="settlements">社区大V业务看板</option>
             <option value="kolMetrics">大V账号数据统计</option>
-            <option value="hotFunds">支付宝热门基金榜</option>
+            <option value="hotFunds">热门基金榜</option>
           </select>
         </label>
       </section>
@@ -80,6 +81,41 @@
         </div>
       </section>
 
+      <section id="postProductionView" class="app-view" data-view="postProduction" hidden>
+        <section class="data-panel publish-panel" aria-label="KOL帖子生产">
+          <div class="section-head publish-head">
+            <div>
+              <h2>KOL帖子生产</h2>
+              <p id="publishSourceLine">post_supplement_lib.t_publish_tasks</p>
+            </div>
+            <div class="publish-actions">
+              <button id="publishRefreshButton" type="button">刷新</button>
+            </div>
+          </div>
+
+          <section class="query-bar publish-filter-bar" aria-label="KOL帖子生产筛选">
+            <label>
+              <span>日期</span>
+              <select id="publishDateSelect"></select>
+            </label>
+            <label class="search-field">
+              <span>选题</span>
+              <input id="publishTitleInput" type="search" placeholder="搜索选题" />
+            </label>
+            <label>
+              <span>行数</span>
+              <input id="publishLimitInput" type="number" min="1" max="1000" value="200" />
+            </label>
+          </section>
+
+          <section class="summary publish-summary" id="publishSummary"></section>
+
+          <section id="publishResultsList" class="results-list" aria-label="KOL帖子生产列表">
+            <div class="empty-state">正在加载...</div>
+          </section>
+        </section>
+      </section>
+
       <section id="rerunView" class="app-view" data-view="rerun" hidden>
         <section class="rerun-panel" aria-label="重跑帖子阅读数">
           <div class="section-head">
@@ -127,52 +163,52 @@
           <section class="settlement-stats" id="settlementStats" aria-label="结算统计" hidden></section>
 
           <section class="settlement-dimensions" aria-label="结算维度筛选">
-            <label>
+            <label class="settlement-filter-view">
               <span>展示</span>
               <select id="settlementViewModeSelect">
                 <option value="all">全部</option>
                 <option value="customer">客户</option>
               </select>
             </label>
-            <label>
+            <label class="settlement-filter-date">
               <span>起始日期</span>
               <input id="settlementStartDateInput" type="date" />
             </label>
-            <label>
+            <label class="settlement-filter-date">
               <span>结束日期</span>
               <input id="settlementEndDateInput" type="date" />
             </label>
-            <label>
+            <label class="settlement-filter-partner">
               <span>合作方</span>
               <select id="settlementPartnerSelect">
                 <option value="">全部合作方</option>
               </select>
             </label>
-            <label>
+            <label class="settlement-filter-platform">
               <span>投放平台</span>
               <select id="settlementDeliveryPlatformSelect">
                 <option value="">全部投放平台</option>
               </select>
             </label>
-            <label>
+            <label class="settlement-filter-type">
               <span>内外部</span>
               <select id="settlementKolTypeSelect">
                 <option value="">全部内外部</option>
               </select>
             </label>
-            <label>
+            <label class="settlement-filter-ip">
               <span>IP名称</span>
               <select id="settlementIpNameSelect">
                 <option value="">全部 IP</option>
               </select>
             </label>
-            <label>
+            <label class="settlement-filter-missing">
               <span>空值筛选</span>
               <select id="settlementMissingSelect">
                 <option value="">全部</option>
               </select>
             </label>
-            <label>
+            <label class="settlement-filter-sort">
               <span>排序</span>
               <select id="settlementSortSelect">
                 <option value="date_desc">日期最新</option>
@@ -291,10 +327,10 @@
         </section>
       </section>
       <section id="hotFundsView" class="app-view" data-view="hotFunds" hidden>
-        <section class="kol-panel hot-funds-panel" aria-label="支付宝热门基金榜">
+        <section class="kol-panel hot-funds-panel" aria-label="热门基金榜">
           <div class="section-head kol-head">
             <div>
-              <h2>支付宝热门基金榜</h2>
+              <h2>热门基金榜</h2>
               <p id="hotFundsSourceLine">crawler_app.alipay_hot_fund_rankings</p>
             </div>
             <div class="kol-actions">
@@ -303,10 +339,14 @@
             </div>
           </div>
 
-          <section class="kol-filter-bar hot-funds-filter-bar" aria-label="支付宝热门基金榜筛选">
+          <section class="kol-filter-bar hot-funds-filter-bar" aria-label="热门基金榜筛选">
             <label>
               <span>日期</span>
               <select id="hotFundsDateSelect"></select>
+            </label>
+            <label>
+              <span>App</span>
+              <select id="hotFundsAppSelect"></select>
             </label>
             <label>
               <span>行数</span>
@@ -317,7 +357,7 @@
           <section class="summary kol-summary" id="hotFundsSummary"></section>
 
           <div class="kol-table-wrap hot-funds-table-wrap">
-            <table class="kol-table hot-funds-table" aria-label="支付宝热门基金榜表">
+            <table class="kol-table hot-funds-table" aria-label="热门基金榜表">
               <thead id="hotFundsTableHead"></thead>
               <tbody id="hotFundsTableBody"></tbody>
             </table>
@@ -329,7 +369,7 @@
     <script>
       (() => {
         const path = window.location.pathname;
-        const activeView = path === "/rerun" ? "rerun" : path === "/settlements" ? "settlements" : path === "/kol-metrics" ? "kolMetrics" : path === "/hot-funds" ? "hotFunds" : "posts";
+        const activeView = path === "/rerun" ? "rerun" : path === "/settlements" ? "settlements" : path === "/kol-metrics" ? "kolMetrics" : path === "/hot-funds" ? "hotFunds" : path === "/post-production" ? "postProduction" : "posts";
         document.querySelectorAll("[data-view]").forEach((section) => {
           section.hidden = section.dataset.view !== activeView;
         });
@@ -339,10 +379,11 @@
         if (refreshButton) refreshButton.hidden = activeView !== "posts";
       })();
     </script>
-    <script src="/static/app.js?v=20260715-hot-funds"></script>
+    <script src="/static/app.js?v=20260723-post-production"></script>
     <script src="/static/rerun.js?v=20260706-dashboard-page-renames"></script>
-    <script src="/static/settlements.js?v=20260721-settlement-kol-type-filter"></script>
+    <script src="/static/settlements.js?v=20260721-settlement-inline-edit-compact2"></script>
     <script src="/static/kol_metrics.js?v=20260720-fill-read-count"></script>
-    <script src="/static/hot_funds.js?v=20260715-hot-funds-code"></script>
+    <script src="/static/hot_funds.js?v=20260722-hot-funds-app-labels-2"></script>
+    <script src="/static/post_production.js?v=20260723-post-production"></script>
   </body>
 </html>

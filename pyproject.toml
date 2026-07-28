@@ -18,6 +18,9 @@ dev = [
   "httpx>=0.27.0",
 ]
 
+[tool.setuptools]
+packages = ["post_viewer"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

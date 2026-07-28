@@ -3,6 +3,7 @@
     payload: null,
     filters: {
       date: "",
+      app: "",
       limit: "200",
     },
   };
@@ -35,6 +36,19 @@
     return value === null || value === undefined || value === "";
   }
 
+  function sourceAppLabel(value) {
+    const labels = {
+      alipay: "支付宝",
+      eastmoney_fund: "天天基金",
+      jd_finance: "京东金融",
+      yangjibao: "养基宝",
+      xiaobei: "小倍养基",
+      ths: "同花顺",
+      tenpay: "理财通",
+    };
+    return labels[String(value || "").trim()] || String(value || "");
+  }
+
   function mysqlValue(value) {
     if (isEmpty(value)) return `<span class="mysql-null">NULL</span>`;
     return escapeHtml(value);
@@ -50,11 +64,13 @@
   function readFiltersFromUrl() {
     const params = new URLSearchParams(window.location.search);
     state.filters.date = params.get("date") || "";
+    state.filters.app = params.get("app") || "";
     state.filters.limit = params.get("limit") || state.filters.limit;
   }
 
   function readFiltersFromInputs() {
     state.filters.date = $("#hotFundsDateSelect")?.value || "";
+    state.filters.app = $("#hotFundsAppSelect")?.value || "";
     state.filters.limit = $("#hotFundsLimitInput")?.value || "200";
   }
 
@@ -62,6 +78,7 @@
     if (!isActive()) return;
     const params = new URLSearchParams();
     if (state.filters.date) params.set("date", state.filters.date);
+    if (state.filters.app) params.set("app", state.filters.app);
     if (state.filters.limit && state.filters.limit !== "200") params.set("limit", state.filters.limit);
     const query = params.toString();
     window.history.replaceState(null, "", query ? `/hot-funds?${query}` : "/hot-funds");
@@ -70,6 +87,7 @@
   function apiUrl(path) {
     const params = new URLSearchParams();
     if (state.filters.date) params.set("date", state.filters.date);
+    if (state.filters.app) params.set("app", state.filters.app);
     if (state.filters.limit) params.set("limit", state.filters.limit);
     const query = params.toString();
     return query ? `${path}?${query}` : path;
@@ -86,6 +104,10 @@
     const payload = state.payload || {};
     const options = payload.options || {};
     $("#hotFundsDateSelect").innerHTML = optionList(options.dates || [], state.filters.date, "全部日期");
+    $("#hotFundsAppSelect").innerHTML = [
+      `<option value="">全部 App</option>`,
+      ...(options.apps || []).map((value) => `<option value="${escapeHtml(value)}"${String(value) === state.filters.app ? " selected" : ""}>${escapeHtml(sourceAppLabel(value))}</option>`),
+    ].join("");
     $("#hotFundsLimitInput").value = state.filters.limit;
   }
 
@@ -98,6 +120,7 @@
       <span>显示: <strong>${rows.length}</strong></span>
       <span>总计: <strong>${summary.total_rows || 0}</strong></span>
       <span>日期: <strong>${summary.date_count || 0}</strong></span>
+      <span>App: <strong>${summary.app_count || 0}</strong></span>
       <span>截图: <strong>${summary.screenshot_rows || 0}</strong></span>
     `;
   }
@@ -121,13 +144,13 @@
       $("#hotFundsTableBody").innerHTML = `<tr><td colspan="${(columns.length || 0) + 1}" class="mysql-empty-row">Empty set</td></tr>`;
       return;
     }
-    const numericKeys = new Set(["rank_no"]);
+    const numericKeys = new Set(["rank_no", "change_text"]);
     const wideKeys = new Set(["fund_name", "screenshot_url"]);
     $("#hotFundsTableBody").innerHTML = rows
       .map((row, index) => {
         const cells = columns.map(([, key]) => {
           if (key === "screenshot_url") return screenshotCell(row);
-          const value = numericKeys.has(key) ? numberText(row[key]) : row[key];
+          const value = key === "source_app" ? sourceAppLabel(row[key]) : numericKeys.has(key) ? numberText(row[key]) : row[key];
           const classNames = ["mysql-cell"];
           if (numericKeys.has(key)) classNames.push("mysql-number");
           if (wideKeys.has(key)) classNames.push("mysql-wide");
@@ -149,7 +172,7 @@
   async function loadHotFunds() {
     if (!isActive()) return;
     $("#hotFundsRefreshButton").disabled = true;
-    $("#hotFundsSourceLine").textContent = "正在读取支付宝热门基金榜...";
+    $("#hotFundsSourceLine").textContent = "正在读取热门基金榜...";
     try {
       state.payload = await fetchJson(apiUrl("/api/hot-funds"));
       renderFilters();
@@ -201,6 +224,10 @@
 
   function bindEvents() {
     $("#hotFundsDateSelect")?.addEventListener("change", () => {
+      readFiltersFromInputs();
+      loadHotFunds();
+    });
+    $("#hotFundsAppSelect")?.addEventListener("change", () => {
       readFiltersFromInputs();
       loadHotFunds();
     });

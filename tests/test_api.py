@@ -148,15 +148,19 @@ class HotFundCursor:
         self.connection.queries.append((sql, tuple(params)))
         if "SELECT DISTINCT snapshot_date" in sql:
             self.result = [{"snapshot_date": date(2026, 7, 15)}, {"snapshot_date": date(2026, 7, 14)}]
+        elif "SELECT DISTINCT source_app" in sql:
+            self.result = [{"source_app": "alipay"}, {"source_app": "tenpay"}]
         elif "COUNT(*) AS total_rows" in sql:
-            self.result = [{"total_rows": 1, "date_count": 1, "screenshot_rows": 1}]
-        elif "SELECT snapshot_date, rank_no, fund_code, fund_name, screenshot_path" in sql:
+            self.result = [{"total_rows": 1, "date_count": 1, "app_count": 1, "screenshot_rows": 1}]
+        elif "SELECT snapshot_date, source_app, rank_no, fund_code, fund_name, change_text, screenshot_path" in sql:
             self.result = [
                 {
                     "snapshot_date": date(2026, 7, 15),
+                    "source_app": "alipay",
                     "rank_no": 1,
                     "fund_code": "000001",
                     "fund_name": "测试基金",
+                    "change_text": "+12.34%",
                     "screenshot_path": str(self.connection.screenshot_path),
                 }
             ]
@@ -181,6 +185,58 @@ class HotFundConnection:
 
     def cursor(self) -> HotFundCursor:
         return HotFundCursor(self)
+
+
+class PublishTaskCursor:
+    def __init__(self, connection: "PublishTaskConnection") -> None:
+        self.connection = connection
+        self.result: list[dict[str, Any]] = []
+
+    def __enter__(self) -> "PublishTaskCursor":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> None:
+        self.connection.queries.append((sql, tuple(params)))
+        if "SELECT DISTINCT trade_date" in sql:
+            self.result = [{"trade_date": date(2026, 7, 22)}, {"trade_date": date(2026, 7, 21)}]
+        elif "COUNT(*) AS total_rows" in sql:
+            self.result = [{"total_rows": 1, "date_count": 1, "title_count": 1}]
+        elif "ORDER BY trade_date DESC" in sql and "LIMIT 1" in sql:
+            self.result = [{"trade_date": date(2026, 7, 22)}]
+        elif "ORDER BY task_id DESC" in sql:
+            self.result = [
+                {
+                    "task_id": 9001,
+                    "trade_date": date(2026, 7, 22),
+                    "title": "测试选题",
+                    "body": "最终版正文",
+                    "status": "ready",
+                    "quality_score": 92,
+                }
+            ]
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self.result[0] if self.result else None
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self.result
+
+
+class PublishTaskConnection:
+    def __init__(self) -> None:
+        self.queries: list[tuple[str, tuple[Any, ...]]] = []
+
+    def __enter__(self) -> "PublishTaskConnection":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> PublishTaskCursor:
+        return PublishTaskCursor(self)
 
 
 class RerunCursor:
@@ -536,6 +592,17 @@ def test_kol_read_count_source_fills_merged_date_cells() -> None:
     ]
 
 
+def test_kol_read_count_source_accepts_t_minus_one_read_header() -> None:
+    rows = api._kol_read_rows_from_matrix(
+        [
+            ["日期", "账号名称", "T-1日的文章阅读数", "标题", "类型", "平台"],
+            ["2026-07-27", "acct-a", "181", "title", "内部", "理财通"],
+        ]
+    )
+
+    assert rows == [{"metric_date": "2026-07-27", "kol_name": "acct-a", "read_count": "181"}]
+
+
 def test_tencent_cell_text_reads_time_cells() -> None:
     assert (
         api._tencent_cell_text({"cellValue": {"time": {"year": 2026, "month": 7, "day": 20}}})
@@ -718,6 +785,93 @@ def test_settlement_import_update_sql_does_not_overwrite_autofill_with_zero() ->
     assert "fee = COALESCE(VALUES(fee), fee)" in sql
 
 
+def test_update_settlement_engagement_only_updates_comment_and_like(monkeypatch) -> None:
+    class SettlementUpdateCursor:
+        def __init__(self, connection: "SettlementUpdateConnection") -> None:
+            self.connection = connection
+            self.result: list[dict[str, Any]] = []
+
+        def __enter__(self) -> "SettlementUpdateCursor":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+            self.connection.queries.append((sql, params))
+            if f"UPDATE {api.SETTLEMENT_TABLE}" in sql:
+                self.connection.updates.append(params)
+                self.result = []
+            elif f"SELECT id FROM {api.SETTLEMENT_TABLE}" in sql:
+                self.result = [{"id": params[0]}]
+            elif f"FROM {api.SETTLEMENT_TABLE}" in sql:
+                self.result = [
+                    {
+                        "id": 7,
+                        "settlement_date": date(2026, 7, 20),
+                        "partner": "partner",
+                        "delivery_platform": "理财通",
+                        "product_name": "",
+                        "ip_name": "acct",
+                        "fans_count": 100,
+                        "article_type": "",
+                        "fee": None,
+                        "creator_fee": None,
+                        "kol_type": "内部",
+                        "buy_amount": None,
+                        "post_url": "",
+                        "article_title": "",
+                        "screenshot_url": "",
+                        "read_count": None,
+                        "comment_count": 12,
+                        "like_count": 34,
+                        "partner_payment_status": "",
+                        "creator_settlement_status": "",
+                        "notes": "",
+                    }
+                ]
+
+        def fetchone(self) -> dict[str, Any] | None:
+            return self.result[0] if self.result else None
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self.result
+
+    class SettlementUpdateConnection:
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, tuple[Any, ...]]] = []
+            self.updates: list[tuple[Any, ...]] = []
+            self.committed = False
+
+        def __enter__(self) -> "SettlementUpdateConnection":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def cursor(self) -> SettlementUpdateCursor:
+            return SettlementUpdateCursor(self)
+
+        def commit(self) -> None:
+            self.committed = True
+
+    connection = SettlementUpdateConnection()
+    monkeypatch.setattr(api, "_connect", lambda: connection)
+    monkeypatch.setattr(api, "_ensure_settlement_table", lambda _connection: None)
+    client = TestClient(api.create_app())
+
+    response = client.post("/api/settlements/update-engagement", json={"id": 7, "field": "commentCount", "value": "12"})
+    blocked = client.post("/api/settlements/update-engagement", json={"id": 7, "field": "fee", "value": "99"})
+
+    assert response.status_code == 200
+    assert blocked.status_code == 400
+    assert connection.updates == [(12, 7)]
+    assert connection.committed is True
+    assert response.json()["rows"][0]["commentCount"] == "12"
+    assert any("comment_count = %s" in sql for sql, _params in connection.queries)
+    assert not any("fee = %s" in sql for sql, _params in connection.queries)
+
+
 def test_externalize_local_capture_path_uses_public_base(monkeypatch, tmp_path) -> None:
     capture_root = tmp_path / "captures"
     image_path = capture_root / "record_1" / "page_000.png"
@@ -739,18 +893,48 @@ def test_hot_fund_rankings_payload_filters_date_and_externalizes_screenshot(monk
     monkeypatch.setenv("EASY_VIEWER_PUBLIC_BASE_URL", "http://192.168.1.30:8898")
     monkeypatch.setattr(api, "_connect", lambda: connection)
 
-    payload = api._hot_fund_rankings_payload({"date": "2026-07-15", "limit": 20})
+    payload = api._hot_fund_rankings_payload({"date": "2026-07-15", "app": "alipay", "limit": 20})
 
     assert payload["table"] == api.ALIPAY_HOT_FUND_RANKINGS_TABLE
     assert payload["filters"]["snapshot_date"] == "2026-07-15"
+    assert payload["filters"]["source_app"] == "alipay"
     assert payload["options"]["dates"] == ["2026-07-15", "2026-07-14"]
+    assert payload["options"]["apps"] == ["alipay", "tenpay"]
     assert payload["columns"] == [
         ("日期", "snapshot_date"),
+        ("来源App", "source_app"),
         ("排名", "rank_no"),
         ("基金代码", "fund_code"),
         ("基金名称", "fund_name"),
+        ("近一年收益率", "change_text"),
         ("截图", "screenshot_url"),
     ]
     assert payload["rows"][0]["fund_code"] == "000001"
+    assert payload["rows"][0]["source_app"] == "alipay"
+    assert payload["rows"][0]["change_text"] == "+12.34%"
     assert payload["rows"][0]["screenshot_url"] == "http://192.168.1.30:8898/captures/hot_funds/rank_001.png"
-    assert any(params == (date(2026, 7, 15), 20) for _sql, params in connection.queries)
+    assert any(params == (date(2026, 7, 15), "alipay", 20) for _sql, params in connection.queries)
+
+
+def test_publish_tasks_payload_filters_date_and_title(monkeypatch) -> None:
+    connection = PublishTaskConnection()
+    monkeypatch.setattr(api, "_connect", lambda: connection)
+
+    payload = api._publish_tasks_payload({"date": "2026-07-22", "title": "测试", "limit": 20})
+
+    assert payload["table"] == api.PUBLISH_TASK_TABLE
+    assert payload["filters"]["trade_date"] == "2026-07-22"
+    assert payload["filters"]["title"] == "测试"
+    assert payload["options"]["dates"] == ["2026-07-22", "2026-07-21"]
+    assert payload["summary"] == {"total_rows": 1, "date_count": 1, "title_count": 1}
+    assert payload["rows"] == [
+        {
+            "task_id": "9001",
+            "date": "2026-07-22",
+            "title": "测试选题",
+            "body": "最终版正文",
+            "status": "ready",
+            "quality_score": "92",
+        }
+    ]
+    assert any(params == ("content_item", date(2026, 7, 22), "%测试%", 20) for _sql, params in connection.queries)

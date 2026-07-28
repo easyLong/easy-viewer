@@ -467,6 +467,60 @@ textarea {
   flex: 0 0 auto;
 }
 
+.publish-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.publish-head {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.publish-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.publish-filter-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 10px 0 0;
+}
+
+.publish-filter-bar label {
+  flex: 0 0 180px;
+}
+
+.publish-filter-bar .search-field {
+  flex-basis: 420px;
+}
+
+.publish-filter-bar label:last-child {
+  flex-basis: 120px;
+}
+
+.publish-summary {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.publish-post-item {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.publish-copy-button {
+  flex: 0 0 auto;
+}
+
 .empty-state {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -678,18 +732,29 @@ textarea {
   border: 1px solid var(--line);
   border-radius: 6px;
   display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(8, minmax(116px, 1fr));
-  padding: 10px;
+  gap: 8px;
+  grid-template-columns: 78px 126px 126px minmax(132px, 1.05fr) 116px 94px minmax(136px, 1.05fr) 158px 118px;
+  overflow-x: auto;
+  padding: 8px;
 }
 
 .settlement-dimensions label {
   min-width: 0;
 }
 
+.settlement-dimensions label span {
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .settlement-dimensions input,
 .settlement-dimensions select {
+  border-radius: 4px;
+  font-size: 12px;
+  min-height: 30px;
   min-width: 0;
+  padding: 0 8px;
   width: 100%;
 }
 
@@ -976,6 +1041,48 @@ textarea {
   text-align: right;
 }
 
+.settlement-edit-input {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  box-sizing: border-box;
+  color: #101828;
+  display: inline-block;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  line-height: inherit;
+  margin: 0;
+  max-width: 72px;
+  min-height: 0;
+  padding: 0 2px;
+  text-align: right;
+  width: 100%;
+}
+
+.settlement-edit-input:hover {
+  background: #fff;
+  border-color: #d9dee7;
+}
+
+.settlement-edit-input:focus {
+  background: #fff;
+  border-color: #7aa7e8;
+  box-shadow: 0 0 0 1px rgba(122, 167, 232, 0.18);
+  outline: none;
+}
+
+.settlement-edit-input::-webkit-outer-spin-button,
+.settlement-edit-input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.mysql-editing .settlement-edit-input {
+  background: #f8fafc;
+  color: #667085;
+}
+
 .mysql-null {
   color: #98a2b3;
   font-style: italic;
@@ -1199,9 +1306,23 @@ textarea {
   text-decoration: none;
 }
 
-.hot-funds-filter-bar {
-  grid-template-columns: minmax(160px, 220px) minmax(120px, 160px);
-  justify-content: start;
+.kol-filter-bar.hot-funds-filter-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 10px;
+  overflow-x: auto;
+}
+
+.hot-funds-filter-bar label {
+  flex: 0 0 180px;
+}
+
+.hot-funds-filter-bar label:nth-child(2) {
+  flex-basis: 160px;
+}
+
+.hot-funds-filter-bar label:last-child {
+  flex-basis: 128px;
 }
 
 .hot-funds-table {
@@ -1245,9 +1366,12 @@ textarea {
     grid-template-columns: 1fr 1fr;
   }
 
-  .kol-filter-bar,
-  .settlement-dimensions {
+  .kol-filter-bar {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .kol-filter-bar.hot-funds-filter-bar {
+    grid-template-columns: minmax(160px, 220px) minmax(140px, 180px) minmax(120px, 160px);
   }
 
   .settlement-chart-grid {
@@ -1280,9 +1404,12 @@ textarea {
   }
 
   .query-bar,
-  .kol-filter-bar,
-  .settlement-dimensions {
+  .kol-filter-bar {
     grid-template-columns: 1fr;
+  }
+
+  .kol-filter-bar.hot-funds-filter-bar {
+    grid-template-columns: minmax(160px, 220px) minmax(140px, 180px) minmax(120px, 160px);
   }
 
   .settlement-hbar-row {

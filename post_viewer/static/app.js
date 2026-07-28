@@ -18,10 +18,12 @@ function viewFromPath() {
   if (window.location.pathname === "/settlements") return "settlements";
   if (window.location.pathname === "/kol-metrics") return "kolMetrics";
   if (window.location.pathname === "/hot-funds") return "hotFunds";
+  if (window.location.pathname === "/post-production") return "postProduction";
   return "posts";
 }
 
 function viewPath(view) {
+  if (view === "postProduction") return "/post-production";
   if (view === "hotFunds") return "/hot-funds";
   if (view === "kolMetrics") return "/kol-metrics";
   if (view === "settlements") return "/settlements";
@@ -33,7 +35,7 @@ function isPostsViewActive() {
 }
 
 function setActiveView(view, options = {}) {
-  state.activeView = ["posts", "rerun", "settlements", "kolMetrics", "hotFunds"].includes(view) ? view : "posts";
+  state.activeView = ["posts", "postProduction", "rerun", "settlements", "kolMetrics", "hotFunds"].includes(view) ? view : "posts";
   document.querySelectorAll("[data-view]").forEach((section) => {
     section.hidden = section.dataset.view !== state.activeView;
   });
@@ -44,13 +46,15 @@ function setActiveView(view, options = {}) {
   $("#refreshButton").hidden = state.activeView !== "posts";
   if (state.activeView === "rerun") {
     $("#sourceLine").textContent = "重跑帖子阅读数";
+  } else if (state.activeView === "postProduction") {
+    $("#sourceLine").textContent = "KOL帖子生产";
   } else if (state.activeView === "settlements") {
     $("#sourceLine").textContent = "社区大V业务看板";
   } else if (state.activeView === "kolMetrics") {
     $("#sourceLine").textContent = "大V账号数据统计";
   }
   if (state.activeView === "hotFunds") {
-    $("#sourceLine").textContent = "支付宝热门基金榜";
+    $("#sourceLine").textContent = "热门基金榜";
   }
   if (options.push) {
     window.history.pushState({ view: state.activeView }, "", viewPath(state.activeView));
