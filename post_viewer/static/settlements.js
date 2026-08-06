@@ -4,6 +4,7 @@
     "partner",
     "deliveryPlatform",
     "product",
+    "productCode",
     "ipName",
     "fansCount",
     "articleType",
@@ -22,12 +23,13 @@
     "notes",
   ];
   const numericFields = new Set(["fansCount", "fee", "creatorFee", "buyAmount", "readCount", "commentCount", "likeCount"]);
-  const editableMetricFields = new Set(["commentCount", "likeCount"]);
+  const editableMetricFields = new Set(["readCount", "commentCount", "likeCount"]);
   const headerLabels = {
     date: "日期",
     partner: "合作方",
     deliveryPlatform: "投放平台",
     product: "产品",
+    productCode: "代码",
     ipName: "IP名称",
     fansCount: "粉丝数",
     articleType: "文章类型",
@@ -50,6 +52,7 @@
   let viewMode = "all";
   let chartsVisible = false;
   let publicBaseUrl = "";
+  const deleteMode = new URLSearchParams(window.location.search).has("delete");
   const filters = {
     startDate: "",
     endDate: "",
@@ -355,6 +358,7 @@
             return `<td class="mysql-cell mysql-number">${formatSum(field, numericSum(summaryRows, field))}</td>`;
           })
           .join("")}
+        ${deleteMode ? "<td></td>" : ""}
       </tr>
     `;
   }
@@ -368,6 +372,9 @@
     document.querySelectorAll("[data-settlement-field]").forEach((element) => {
       const field = element.dataset.settlementField;
       element.hidden = viewMode === "customer" && customerHiddenFields.has(field);
+    });
+    document.querySelectorAll("[data-settlement-delete-column]").forEach((element) => {
+      element.hidden = !deleteMode;
     });
     const table = document.querySelector(".settlement-table");
     if (table) table.classList.toggle("settlement-table-customer", viewMode === "customer");
@@ -495,7 +502,7 @@
     if (!visibleRows.length) {
       body.innerHTML = `
         <tr>
-          <td class="mysql-empty-row" colspan="${tableFields.length + 1}">Empty set</td>
+          <td class="mysql-empty-row" colspan="${tableFields.length + (deleteMode ? 2 : 1)}">Empty set</td>
         </tr>
       `;
       renderStatsRow(visibleRows, tableFields);
@@ -509,6 +516,11 @@
           <tr data-row-id="${escapeHtml(row.id || "")}">
             <td class="mysql-row-index">${index + 1}</td>
             ${tableFields.map((field) => cell(row, field)).join("")}
+            ${deleteMode ? `
+              <td class="mysql-cell settlement-operation-cell">
+                <button class="settlement-delete-button" type="button" data-settlement-delete="1" data-row-id="${escapeHtml(row.id || "")}" aria-label="删除第 ${index + 1} 行">删除</button>
+              </td>
+            ` : ""}
           </tr>
         `,
       )
@@ -594,10 +606,10 @@
   function normalizeEditableMetricValue(input) {
     const value = String(input.value || "").trim();
     if (!value) return "";
-    if (!/^\d+$/.test(value)) throw new Error("评论和点赞必须是非负整数");
+    if (!/^\d+$/.test(value)) throw new Error("阅读量、评论和点赞必须是非负整数");
     const number = Number(value);
     if (!Number.isInteger(number) || number < 0) {
-      throw new Error("评论和点赞必须是非负整数");
+      throw new Error("阅读量、评论和点赞必须是非负整数");
     }
     return String(number);
   }
@@ -640,6 +652,21 @@
       input.value = original;
       renderSummary(filteredRows(), error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async function deleteSettlement(rowId) {
+    const row = rows.find((item) => String(item.id || "") === String(rowId || ""));
+    if (!row || !row.id) return;
+    const description = [row.date, row.ipName, row.productCode || row.product].filter(Boolean).join(" / ");
+    if (!window.confirm(`确认删除整行数据${description ? `（${description}）` : ""}吗？此操作不可撤销。`)) return;
+
+    renderSummary(filteredRows(), "正在删除...");
+    const response = await fetch(`/api/settlements/${encodeURIComponent(row.id)}`, { method: "DELETE" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || response.statusText);
+    setRows(body.rows || []);
+    render();
+    renderSummary(filteredRows(), "已删除整行数据");
   }
 
   function statsExportRow(tableFields, summaryRows) {
@@ -763,6 +790,15 @@
       if (!input) return;
       saveEditableMetric(input).catch((error) => {
         document.querySelector("#settlementSourceLine").textContent = error instanceof Error ? error.message : String(error);
+      });
+    });
+    document.querySelector("#settlementTableBody").addEventListener("click", (event) => {
+      const button = event.target.closest?.("[data-settlement-delete]");
+      if (!button) return;
+      button.disabled = true;
+      deleteSettlement(button.dataset.rowId).catch((error) => {
+        button.disabled = false;
+        renderSummary(filteredRows(), error instanceof Error ? error.message : String(error));
       });
     });
   }

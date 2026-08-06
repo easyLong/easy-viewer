@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import base64
+import io
 import os
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 from post_viewer import api
 
@@ -660,6 +663,56 @@ def test_tencent_doc_headers_use_app_config_not_environment(monkeypatch) -> None
     assert headers["Open-Id"] == "db-open"
 
 
+def test_tencent_doc_headers_reports_expired_access_token(monkeypatch) -> None:
+    def encode_part(value: dict[str, Any]) -> str:
+        return base64.urlsafe_b64encode(json.dumps(value).encode("utf-8")).decode("ascii").rstrip("=")
+
+    expired_token = ".".join(
+        [
+            encode_part({"alg": "HS256"}),
+            encode_part({"exp": (datetime.now(timezone.utc) - timedelta(minutes=1)).timestamp()}),
+            "signature",
+        ]
+    )
+
+    class ConfigCursor:
+        def __enter__(self) -> "ConfigCursor":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def execute(self, _sql: str, _params: tuple[Any, ...] = ()) -> None:
+            return None
+
+        def fetchall(self) -> list[dict[str, str]]:
+            return [
+                {"config_key": "TENCENT_DOC_ACCESS_TOKEN", "config_value": expired_token},
+                {"config_key": "TENCENT_DOC_CLIENT_ID", "config_value": "db-client"},
+                {"config_key": "TENCENT_DOC_OPEN_ID", "config_value": "db-open"},
+            ]
+
+    class ConfigConnection:
+        def __enter__(self) -> "ConfigConnection":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def cursor(self) -> ConfigCursor:
+            return ConfigCursor()
+
+    monkeypatch.setattr(api, "_connect", lambda: ConfigConnection())
+
+    try:
+        api._tencent_doc_headers()
+    except ValueError as exc:
+        assert "Access-Token 已过期" in str(exc)
+        assert "TENCENT_DOC_CLIENT_SECRET 为空" in str(exc)
+    else:
+        raise AssertionError("expired token should raise ValueError")
+
+
 def test_kol_read_count_fill_updates_internal_licaitong_rows(monkeypatch) -> None:
     connection = KolReadFillConnection()
     monkeypatch.setattr(api, "_connect", lambda: connection)
@@ -695,6 +748,7 @@ def test_settlement_import_preserves_zero_engagement_metrics() -> None:
             "合作方": "partner",
             "投放平台": "platform",
             "产品": "product",
+            "代码": "000001",
             "IP名称": "ip",
             "粉丝数": "0",
             "文章类型": "宣传贴",
@@ -715,6 +769,35 @@ def test_settlement_import_preserves_zero_engagement_metrics() -> None:
     assert row["like_count"] == 0
 
 
+def test_settlement_import_pads_numeric_product_code() -> None:
+    row = api._normalize_settlement_row(
+        {
+            "日期": "2026-07-31",
+            "产品": "富国全球科技互联网股票(QDII)C",
+            "代码": 22184,
+            "IP名称": "D老师写字的地方",
+            "文章类型": "晒收益",
+        }
+    )
+
+    assert row["product_code"] == "022184"
+
+
+def test_settlement_export_pads_product_code_as_text() -> None:
+    workbook_bytes = api._settlements_xlsx_payload(
+        {
+            "fields": ["date", "productCode", "product"],
+            "rows": [{"date": "2026-07-31", "productCode": 22184, "product": "product"}],
+        }
+    )
+    workbook = load_workbook(io.BytesIO(workbook_bytes))
+    cell = workbook.active["B2"]
+
+    assert cell.value == "022184"
+    assert cell.data_type == "s"
+    assert cell.number_format == "@"
+
+
 def test_settlement_import_treats_machine_recognition_labels_as_empty() -> None:
     row = api._normalize_settlement_row(
         {
@@ -722,6 +805,7 @@ def test_settlement_import_treats_machine_recognition_labels_as_empty() -> None:
             "合作方": "partner",
             "投放平台": "platform",
             "产品": "product",
+            "代码": "000001",
             "IP名称": "ip",
             "文章类型": "宣传贴",
             "链接": "https://example.com/post",
@@ -735,6 +819,7 @@ def test_settlement_import_treats_machine_recognition_labels_as_empty() -> None:
             "合作方": "partner",
             "投放平台": "platform",
             "产品": "product",
+            "代码": "000001",
             "IP名称": "ip2",
             "文章类型": "宣传贴",
             "链接": "https://example.com/post2",
@@ -756,6 +841,7 @@ def test_settlement_import_allows_empty_identity_parts_except_date() -> None:
             "合作方": "partner",
             "投放平台": "platform",
             "产品": "",
+            "代码": "",
             "IP名称": "",
             "文章类型": "",
             "链接": "",
@@ -765,8 +851,36 @@ def test_settlement_import_allows_empty_identity_parts_except_date() -> None:
     assert row["post_url"] == ""
     assert row["ip_name"] == ""
     assert row["product_name"] == ""
+    assert row["product_code"] is None
     assert row["article_type"] == ""
     assert api._settlement_identity_key(row) == ("2026-07-16", "", "", "")
+
+
+def test_settlement_identity_uses_product_code_not_product_name() -> None:
+    first = api._normalize_settlement_row(
+        {
+            "日期": "2026-07-16",
+            "产品": "产品A",
+            "代码": "000001",
+            "IP名称": "ip",
+            "文章类型": "加仓贴",
+            "链接": "https://example.com/a",
+        }
+    )
+    second = api._normalize_settlement_row(
+        {
+            "日期": "2026-07-16",
+            "产品": "产品B",
+            "代码": "000001",
+            "IP名称": "ip",
+            "文章类型": "加仓贴",
+            "链接": "https://example.com/b",
+        }
+    )
+
+    assert first["product_name"] != second["product_name"]
+    assert api._settlement_identity_key(first) == ("2026-07-16", "ip", "000001", "加仓贴")
+    assert api._settlement_identity_key(first) == api._settlement_identity_key(second)
 
 
 def test_settlement_import_update_sql_does_not_overwrite_autofill_with_zero() -> None:
@@ -785,7 +899,7 @@ def test_settlement_import_update_sql_does_not_overwrite_autofill_with_zero() ->
     assert "fee = COALESCE(VALUES(fee), fee)" in sql
 
 
-def test_update_settlement_engagement_only_updates_comment_and_like(monkeypatch) -> None:
+def test_update_settlement_engagement_updates_read_comment_and_like(monkeypatch) -> None:
     class SettlementUpdateCursor:
         def __init__(self, connection: "SettlementUpdateConnection") -> None:
             self.connection = connection
@@ -812,6 +926,7 @@ def test_update_settlement_engagement_only_updates_comment_and_like(monkeypatch)
                         "partner": "partner",
                         "delivery_platform": "理财通",
                         "product_name": "",
+                        "product_code": "",
                         "ip_name": "acct",
                         "fans_count": 100,
                         "article_type": "",
@@ -860,16 +975,79 @@ def test_update_settlement_engagement_only_updates_comment_and_like(monkeypatch)
     monkeypatch.setattr(api, "_ensure_settlement_table", lambda _connection: None)
     client = TestClient(api.create_app())
 
+    read_response = client.post("/api/settlements/update-engagement", json={"id": 7, "field": "readCount", "value": "888"})
     response = client.post("/api/settlements/update-engagement", json={"id": 7, "field": "commentCount", "value": "12"})
     blocked = client.post("/api/settlements/update-engagement", json={"id": 7, "field": "fee", "value": "99"})
 
+    assert read_response.status_code == 200
     assert response.status_code == 200
     assert blocked.status_code == 400
-    assert connection.updates == [(12, 7)]
+    assert connection.updates == [(888, 7), (12, 7)]
     assert connection.committed is True
+    assert read_response.json()["field"] == "readCount"
+    assert read_response.json()["rows"][0]["readCount"] == ""
     assert response.json()["rows"][0]["commentCount"] == "12"
     assert any("comment_count = %s" in sql for sql, _params in connection.queries)
     assert not any("fee = %s" in sql for sql, _params in connection.queries)
+
+
+def test_delete_settlement_removes_a_whole_row(monkeypatch) -> None:
+    class SettlementDeleteCursor:
+        def __init__(self, connection: "SettlementDeleteConnection") -> None:
+            self.connection = connection
+            self.result: list[dict[str, Any]] = []
+
+        def __enter__(self) -> "SettlementDeleteCursor":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+            self.connection.queries.append((sql, params))
+            if f"SELECT id FROM {api.SETTLEMENT_TABLE}" in sql:
+                self.result = [{"id": params[0]}]
+            elif f"DELETE FROM {api.SETTLEMENT_TABLE}" in sql:
+                self.connection.deleted_ids.append(params[0])
+                self.result = []
+            elif f"FROM {api.SETTLEMENT_TABLE}" in sql:
+                self.result = []
+
+        def fetchone(self) -> dict[str, Any] | None:
+            return self.result[0] if self.result else None
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self.result
+
+    class SettlementDeleteConnection:
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, tuple[Any, ...]]] = []
+            self.deleted_ids: list[Any] = []
+            self.committed = False
+
+        def __enter__(self) -> "SettlementDeleteConnection":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def cursor(self) -> SettlementDeleteCursor:
+            return SettlementDeleteCursor(self)
+
+        def commit(self) -> None:
+            self.committed = True
+
+    connection = SettlementDeleteConnection()
+    monkeypatch.setattr(api, "_connect", lambda: connection)
+    monkeypatch.setattr(api, "_ensure_settlement_table", lambda _connection: None)
+    client = TestClient(api.create_app())
+
+    response = client.delete("/api/settlements/9")
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted_id": "9", "rows": []}
+    assert connection.deleted_ids == [9]
+    assert connection.committed is True
 
 
 def test_externalize_local_capture_path_uses_public_base(monkeypatch, tmp_path) -> None:

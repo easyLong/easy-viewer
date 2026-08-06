@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>easy-viewer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260722-hot-funds-filter-nowrap" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260731-settlement-key-notice-2" />
   </head>
   <body>
     <main class="page">
@@ -144,8 +144,22 @@
       <section id="settlementsView" class="app-view" data-view="settlements" hidden>
         <section class="settlement-panel" aria-label="社区大V业务看板">
           <div class="section-head settlement-head">
-            <div>
+            <div class="settlement-title-block">
               <h2>社区大V业务看板</h2>
+              <div class="settlement-key-notice" aria-label="社区大V业务看板唯一键提示">
+                <span class="settlement-key-alert">留意</span>
+                <span class="settlement-key-rule">唯一键</span>
+                <span class="settlement-key-group" aria-label="日期加 IP名称加代码加文章类型">
+                  <span class="settlement-key-token">日期</span>
+                  <span class="settlement-key-plus">+</span>
+                  <span class="settlement-key-token">IP名称</span>
+                  <span class="settlement-key-plus">+</span>
+                  <span class="settlement-key-token">代码</span>
+                  <span class="settlement-key-plus">+</span>
+                  <span class="settlement-key-token">文章类型</span>
+                </span>
+                <span class="settlement-key-note">新增数据请确认唯一性</span>
+              </div>
               <p id="settlementSourceLine" hidden>按 IP 名称补全粉丝数</p>
             </div>
             <div class="settlement-actions">
@@ -242,6 +256,7 @@
                   <th>合作方</th>
                   <th>投放平台</th>
                   <th>产品</th>
+                  <th>代码</th>
                   <th>IP名称</th>
                   <th>粉丝数</th>
                   <th>文章类型</th>
@@ -258,6 +273,7 @@
                   <th data-settlement-field="partnerPaymentStatus">打款进度-合作方</th>
                   <th data-settlement-field="creatorSettlementStatus">结算进度-创作者</th>
                   <th>备注</th>
+                  <th data-settlement-delete-column="1">操作</th>
                 </tr>
               </thead>
               <tbody id="settlementTableBody"></tbody>
@@ -381,7 +397,7 @@
     </script>
     <script src="/static/app.js?v=20260723-post-production"></script>
     <script src="/static/rerun.js?v=20260706-dashboard-page-renames"></script>
-    <script src="/static/settlements.js?v=20260721-settlement-inline-edit-compact2"></script>
+    <script src="/static/settlements.js?v=20260804-delete-mode-query"></script>
     <script src="/static/kol_metrics.js?v=20260720-fill-read-count"></script>
     <script src="/static/hot_funds.js?v=20260722-hot-funds-app-labels-2"></script>
     <script src="/static/post_production.js?v=20260723-post-production"></script>

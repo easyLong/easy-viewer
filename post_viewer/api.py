@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import hashlib
 import html as html_lib
 import csv
@@ -10,8 +11,8 @@ import re
 import socket
 import zipfile
 from pathlib import Path
-from typing import Any
-from datetime import date, datetime, timedelta
+from typing import Any, Callable
+from datetime import date, datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 from urllib.request import Request as UrlRequest, urlopen
@@ -907,6 +908,7 @@ SETTLEMENT_IMPORT_FIELDS = [
     "partner",
     "deliveryPlatform",
     "product",
+    "productCode",
     "ipName",
     "fansCount",
     "articleType",
@@ -930,6 +932,7 @@ SETTLEMENT_EXPORT_LABELS = {
     "partner": "合作方",
     "deliveryPlatform": "投放平台",
     "product": "产品",
+    "productCode": "代码",
     "ipName": "IP名称",
     "fansCount": "粉丝数",
     "articleType": "文章类型",
@@ -956,6 +959,7 @@ SETTLEMENT_DB_COLUMNS = [
     "partner",
     "delivery_platform",
     "product_name",
+    "product_code",
     "ip_name",
     "fans_count",
     "article_type",
@@ -979,6 +983,205 @@ SETTLEMENT_NUMERIC_DB_COLUMNS = {"fans_count", "fee", "creator_fee", "buy_amount
 SETTLEMENT_AUTOFILL_DB_COLUMNS = {"fans_count", "article_title", "screenshot_url", "read_count", "comment_count", "like_count"}
 SETTLEMENT_ZERO_AS_EMPTY_NUMERIC_COLUMNS = {"fans_count"}
 SETTLEMENT_TEXT_PLACEHOLDERS = ("0", "机器识别", "自动识别", "程序识别", "待识别", "最好程序能帮填写")
+SETTLEMENT_REQUIRED_TEXT_DB_COLUMNS = {
+    "partner",
+    "delivery_platform",
+    "product_name",
+    "ip_name",
+    "article_type",
+    "post_url",
+    "post_url_hash",
+    "screenshot_url",
+    "partner_payment_status",
+    "creator_settlement_status",
+    "product_code",
+}
+
+
+def _settlement_product_code_from_text(value: Any) -> str:
+    match = re.search(r"(?<!\d)(\d{6})(?!\d)", str(value or ""))
+    return match.group(1) if match else ""
+
+
+def _clean_settlement_product_code(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    code = _settlement_product_code_from_text(text)
+    if code:
+        return code
+    if re.fullmatch(r"\d+(?:\.0+)?", text):
+        number = str(int(float(text)))
+        if 1 <= len(number) <= 6:
+            return number.zfill(6)
+    return text
+
+
+def _settlement_product_name_key(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"(?<!\d)\d{6}(?!\d)", "", text)
+    text = re.sub(r"[\s（）()【】\[\]·,，;；:：-]+", "", text)
+    return text
+
+
+def _settlement_product_code_map(cursor: Any) -> dict[str, str]:
+    cursor.execute(
+        f"""
+        SELECT product_name, product_code
+        FROM {SETTLEMENT_TABLE}
+        WHERE product_name <> ''
+          AND product_code IS NOT NULL
+          AND product_code <> ''
+        """
+    )
+    candidates: dict[str, set[str]] = {}
+    for row in cursor.fetchall():
+        key = _settlement_product_name_key(row.get("product_name"))
+        code = _clean_settlement_product_code(row.get("product_code"))
+        if key and code:
+            candidates.setdefault(key, set()).add(code)
+    return {key: next(iter(codes)) for key, codes in candidates.items() if len(codes) == 1}
+
+
+def _backfill_settlement_product_codes(cursor: Any) -> None:
+    def update_without_identity_conflict(rows: list[dict[str, Any]], code_getter: Callable[[dict[str, Any]], str]) -> None:
+        updates = []
+        for row in rows:
+            code = _clean_settlement_product_code(code_getter(row))
+            row_id = row.get("id")
+            if not code or not row_id:
+                continue
+            cursor.execute(
+                f"""
+                SELECT id
+                FROM {SETTLEMENT_TABLE}
+                WHERE id <> %s
+                  AND settlement_date = %s
+                  AND ip_name = %s
+                  AND article_type = %s
+                  AND product_code = %s
+                LIMIT 1
+                """,
+                (row_id, row.get("settlement_date"), row.get("ip_name"), row.get("article_type"), code),
+            )
+            if cursor.fetchone():
+                continue
+            updates.append((code, row_id))
+        if not updates:
+            return
+        cursor.executemany(f"UPDATE {SETTLEMENT_TABLE} SET product_code = %s WHERE id = %s", updates)
+
+    cursor.execute(f"SELECT id, settlement_date, ip_name, product_name, product_code, article_type FROM {SETTLEMENT_TABLE} WHERE (product_code IS NULL OR product_code = '') AND product_name <> ''")
+    update_without_identity_conflict(cursor.fetchall(), lambda row: _settlement_product_code_from_text(row.get("product_name")))
+
+    known_codes = _settlement_product_code_map(cursor)
+    if not known_codes:
+        return
+    cursor.execute(f"SELECT id, settlement_date, ip_name, product_name, product_code, article_type FROM {SETTLEMENT_TABLE} WHERE (product_code IS NULL OR product_code = '') AND product_name <> ''")
+    update_without_identity_conflict(cursor.fetchall(), lambda row: known_codes.get(_settlement_product_name_key(row.get("product_name")), ""))
+    cursor.execute(f"UPDATE {SETTLEMENT_TABLE} SET product_code = NULL WHERE product_code = ''")
+
+
+def _settlement_value_present(column: str, value: Any) -> bool:
+    if value is None:
+        return False
+    if column in SETTLEMENT_NUMERIC_DB_COLUMNS:
+        return True
+    return _clean_text(value) != ""
+
+
+def _settlement_collected_score(row: dict[str, Any]) -> int:
+    return sum(1 for column in SETTLEMENT_AUTOFILL_DB_COLUMNS if _settlement_value_present(column, row.get(column)))
+
+
+def _merged_settlement_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    collected_rows = sorted(rows, key=lambda row: (-_settlement_collected_score(row), int(row.get("id") or 0)))
+    business_rows = sorted(rows, key=lambda row: int(row.get("id") or 0), reverse=True)
+    merged: dict[str, Any] = {}
+    for column in SETTLEMENT_DB_COLUMNS:
+        candidates = collected_rows if column in SETTLEMENT_AUTOFILL_DB_COLUMNS else business_rows
+        merged[column] = None
+        for row in candidates:
+            value = row.get(column)
+            if _settlement_value_present(column, value):
+                merged[column] = value
+                break
+        if merged[column] is None and column in SETTLEMENT_REQUIRED_TEXT_DB_COLUMNS:
+            merged[column] = ""
+    merged["post_url_hash"] = _settlement_url_hash(_clean_text(merged.get("post_url")))
+    return merged
+
+
+def _merge_settlement_duplicate_identities(cursor: Any) -> int:
+    cursor.execute(
+        f"""
+        SELECT GROUP_CONCAT(id ORDER BY id) AS ids
+        FROM {SETTLEMENT_TABLE}
+        WHERE product_code IS NOT NULL
+          AND product_code <> ''
+        GROUP BY settlement_date, ip_name, product_code, article_type
+        HAVING COUNT(*) > 1
+        """
+    )
+    groups = cursor.fetchall()
+    merged_count = 0
+    update_assignments = ", ".join(f"{column} = %s" for column in SETTLEMENT_DB_COLUMNS)
+    for group in groups:
+        ids = [int(value) for value in str(group.get("ids") or "").split(",") if value.strip().isdigit()]
+        if len(ids) < 2:
+            continue
+        placeholders = ", ".join(["%s"] * len(ids))
+        cursor.execute(
+            f"""
+            SELECT id, {", ".join(SETTLEMENT_DB_COLUMNS)}
+            FROM {SETTLEMENT_TABLE}
+            WHERE id IN ({placeholders})
+            """,
+            tuple(ids),
+        )
+        rows = cursor.fetchall()
+        if len(rows) < 2:
+            continue
+        keeper = sorted(rows, key=lambda row: (-_settlement_collected_score(row), int(row.get("id") or 0)))[0]
+        keeper_id = int(keeper.get("id") or 0)
+        duplicate_ids = [int(row.get("id") or 0) for row in rows if int(row.get("id") or 0) != keeper_id]
+        if not keeper_id or not duplicate_ids:
+            continue
+        merged = _merged_settlement_row(rows)
+        delete_placeholders = ", ".join(["%s"] * len(duplicate_ids))
+        cursor.execute(f"DELETE FROM {SETTLEMENT_TABLE} WHERE id IN ({delete_placeholders})", tuple(duplicate_ids))
+        cursor.execute(
+            f"""
+            UPDATE {SETTLEMENT_TABLE}
+            SET {update_assignments}
+            WHERE id = %s
+            """,
+            (*tuple(merged[column] for column in SETTLEMENT_DB_COLUMNS), keeper_id),
+        )
+        merged_count += len(duplicate_ids)
+    return merged_count
+
+
+def _settlement_index_columns(cursor: Any, index_name: str) -> list[str]:
+    cursor.execute(f"SHOW INDEX FROM {SETTLEMENT_TABLE} WHERE Key_name = %s", (index_name,))
+    return [str(row.get("Column_name") or "") for row in cursor.fetchall()]
+
+
+def _settlement_new_identity_duplicate_count(cursor: Any) -> int:
+    cursor.execute(
+        f"""
+        SELECT COUNT(*) AS duplicate_groups
+        FROM (
+          SELECT settlement_date, ip_name, product_code, article_type
+          FROM {SETTLEMENT_TABLE}
+          WHERE product_code IS NOT NULL
+            AND product_code <> ''
+          GROUP BY settlement_date, ip_name, product_code, article_type
+          HAVING COUNT(*) > 1
+        ) AS duplicate_keys
+        """
+    )
+    return int((cursor.fetchone() or {}).get("duplicate_groups") or 0)
 
 
 def _ensure_settlement_table(connection: Any) -> None:
@@ -991,6 +1194,7 @@ def _ensure_settlement_table(connection: Any) -> None:
               partner VARCHAR(255) NOT NULL DEFAULT '',
               delivery_platform VARCHAR(255) NOT NULL DEFAULT '',
               product_name VARCHAR(255) NOT NULL DEFAULT '',
+              product_code VARCHAR(64) NULL DEFAULT NULL,
               ip_name VARCHAR(255) NOT NULL DEFAULT '',
               fans_count BIGINT NULL,
               article_type VARCHAR(32) NOT NULL DEFAULT '',
@@ -1012,9 +1216,10 @@ def _ensure_settlement_table(connection: Any) -> None:
               created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
               updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
               PRIMARY KEY (id),
-              UNIQUE KEY uq_settlement_identity (settlement_date, ip_name, product_name, article_type),
+              UNIQUE KEY uq_settlement_identity (settlement_date, ip_name, product_code, article_type),
               KEY idx_settlement_date (settlement_date),
               KEY idx_ip_name (ip_name),
+              KEY idx_product_code (product_code),
               KEY idx_delivery_platform (delivery_platform),
               KEY idx_settlement_post_url_hash (post_url_hash),
               KEY idx_partner (partner)
@@ -1029,15 +1234,33 @@ def _ensure_settlement_table(connection: Any) -> None:
                 ADD COLUMN delivery_platform VARCHAR(255) NOT NULL DEFAULT '' AFTER partner
                 """
             )
-        cursor.execute(f"SHOW INDEX FROM {SETTLEMENT_TABLE} WHERE Key_name = 'idx_delivery_platform'")
-        if not cursor.fetchone():
-            cursor.execute(f"ALTER TABLE {SETTLEMENT_TABLE} ADD KEY idx_delivery_platform (delivery_platform)")
-        cursor.execute(f"SHOW INDEX FROM {SETTLEMENT_TABLE} WHERE Key_name = 'uq_settlement_identity'")
+        cursor.execute(f"SHOW COLUMNS FROM {SETTLEMENT_TABLE} LIKE 'product_code'")
         if not cursor.fetchone():
             cursor.execute(
                 f"""
                 ALTER TABLE {SETTLEMENT_TABLE}
-                ADD UNIQUE KEY uq_settlement_identity (settlement_date, ip_name, product_name, article_type)
+                ADD COLUMN product_code VARCHAR(64) NULL DEFAULT NULL AFTER product_name
+                """
+            )
+        else:
+            cursor.execute(f"ALTER TABLE {SETTLEMENT_TABLE} MODIFY product_code VARCHAR(64) NULL DEFAULT NULL")
+        _backfill_settlement_product_codes(cursor)
+        _merge_settlement_duplicate_identities(cursor)
+        cursor.execute(f"SHOW INDEX FROM {SETTLEMENT_TABLE} WHERE Key_name = 'idx_delivery_platform'")
+        if not cursor.fetchone():
+            cursor.execute(f"ALTER TABLE {SETTLEMENT_TABLE} ADD KEY idx_delivery_platform (delivery_platform)")
+        cursor.execute(f"SHOW INDEX FROM {SETTLEMENT_TABLE} WHERE Key_name = 'idx_product_code'")
+        if not cursor.fetchone():
+            cursor.execute(f"ALTER TABLE {SETTLEMENT_TABLE} ADD KEY idx_product_code (product_code)")
+        identity_columns = _settlement_index_columns(cursor, "uq_settlement_identity")
+        expected_identity_columns = ["settlement_date", "ip_name", "product_code", "article_type"]
+        if identity_columns != expected_identity_columns and _settlement_new_identity_duplicate_count(cursor) == 0:
+            if identity_columns:
+                cursor.execute(f"ALTER TABLE {SETTLEMENT_TABLE} DROP INDEX uq_settlement_identity")
+            cursor.execute(
+                f"""
+                ALTER TABLE {SETTLEMENT_TABLE}
+                ADD UNIQUE KEY uq_settlement_identity (settlement_date, ip_name, product_code, article_type)
                 """
             )
         cursor.execute(f"SHOW INDEX FROM {SETTLEMENT_TABLE} WHERE Key_name = 'idx_settlement_post_url_hash'")
@@ -1102,7 +1325,7 @@ def _settlement_identity_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
     return (
         _date_text(row.get("settlement_date")),
         _clean_text(row.get("ip_name")),
-        _clean_text(row.get("product_name")),
+        _clean_text(row.get("product_code")),
         _clean_text(row.get("article_type")),
     )
 
@@ -1156,6 +1379,9 @@ def _settlement_field_from_header(header: Any) -> str:
         ("日期", "date"),
         ("合作方", "partner"),
         ("投放平台", "deliveryPlatform"),
+        ("基金代码", "productCode"),
+        ("产品代码", "productCode"),
+        ("代码", "productCode"),
         ("产品", "product"),
         ("IP名称", "ipName"),
         ("粉丝数", "fansCount"),
@@ -1292,6 +1518,7 @@ def _settlement_api_row(row: dict[str, Any], request: FastAPIRequest | None = No
         "partner": str(row.get("partner") or ""),
         "deliveryPlatform": str(row.get("delivery_platform") or ""),
         "product": str(row.get("product_name") or ""),
+        "productCode": str(row.get("product_code") or ""),
         "ipName": str(row.get("ip_name") or ""),
         "fansCount": "" if row.get("fans_count") is None else str(row.get("fans_count")),
         "articleType": str(row.get("article_type") or ""),
@@ -1319,6 +1546,9 @@ def _normalize_settlement_row(raw: dict[str, Any]) -> dict[str, Any]:
         "partner": _clean_text(_first_non_empty_value(raw.get("partner"), raw.get("合作方"))),
         "delivery_platform": _clean_text(_first_non_empty_value(raw.get("deliveryPlatform"), raw.get("delivery_platform"), raw.get("投放平台"))),
         "product_name": _clean_text(_first_non_empty_value(raw.get("product"), raw.get("product_name"), raw.get("产品"))),
+        "product_code": _clean_settlement_product_code(
+            _first_non_empty_value(raw.get("productCode"), raw.get("product_code"), raw.get("code"), raw.get("fundCode"), raw.get("fund_code"), raw.get("代码"), raw.get("基金代码"), raw.get("产品代码"))
+        ),
         "ip_name": _clean_text(_first_non_empty_value(raw.get("ipName"), raw.get("ip_name"), raw.get("IP名称"))),
         "fans_count": _clean_int(_first_non_empty_value(raw.get("fansCount"), raw.get("fans_count"), raw.get("粉丝数"))),
         "article_type": _clean_text(_first_non_empty_value(raw.get("articleType"), raw.get("article_type"), raw.get("文章类型"))),
@@ -1338,6 +1568,10 @@ def _normalize_settlement_row(raw: dict[str, Any]) -> dict[str, Any]:
         "notes": _clean_text(_first_non_empty_value(raw.get("notes"), raw.get("备注"))),
         "source_payload_json": json.dumps(raw, ensure_ascii=False, default=str),
     }
+    if not normalized["product_code"]:
+        normalized["product_code"] = _settlement_product_code_from_text(normalized["product_name"])
+    if not normalized["product_code"]:
+        normalized["product_code"] = None
     for metric_column in ("fans_count",):
         if normalized[metric_column] is not None and normalized[metric_column] <= 0:
             normalized[metric_column] = None
@@ -1368,6 +1602,7 @@ def _settlements_payload(limit: int = 500, request: FastAPIRequest | None = None
 
 
 SETTLEMENT_EDITABLE_ENGAGEMENT_FIELDS = {
+    "readCount": "read_count",
     "commentCount": "comment_count",
     "likeCount": "like_count",
 }
@@ -1378,7 +1613,7 @@ def _settlement_edit_metric_value(value: Any) -> int | None:
         return None
     number = _clean_int(value)
     if number is None or number < 0:
-        raise ValueError("评论和点赞必须是非负整数，或留空")
+        raise ValueError("阅读量、评论和点赞必须是非负整数，或留空")
     return number
 
 
@@ -1391,7 +1626,7 @@ def _update_settlement_engagement_payload(payload: dict[str, Any], request: Fast
 
     field = _clean_text(payload.get("field"))
     if field not in SETTLEMENT_EDITABLE_ENGAGEMENT_FIELDS:
-        raise ValueError("只能修改评论或点赞")
+        raise ValueError("只能修改阅读量、评论或点赞")
     column = SETTLEMENT_EDITABLE_ENGAGEMENT_FIELDS[field]
     value = _settlement_edit_metric_value(payload.get("value"))
 
@@ -1416,6 +1651,26 @@ def _update_settlement_engagement_payload(payload: dict[str, Any], request: Fast
         "updated_id": str(row_id),
         "field": field,
         "value": "" if value is None else str(value),
+        "rows": _settlements_payload(request=request),
+    }
+
+
+def _delete_settlement_payload(row_id_value: Any, request: FastAPIRequest | None = None) -> dict[str, Any]:
+    row_id = _parse_int(row_id_value)
+    if row_id is None or row_id <= 0:
+        raise ValueError("缺少有效记录 ID")
+
+    with _connect() as connection:
+        _ensure_settlement_table(connection)
+        with connection.cursor() as cursor:
+            cursor.execute(f"SELECT id FROM {SETTLEMENT_TABLE} WHERE id = %s", (row_id,))
+            if not cursor.fetchone():
+                raise ValueError("记录不存在")
+            cursor.execute(f"DELETE FROM {SETTLEMENT_TABLE} WHERE id = %s", (row_id,))
+        connection.commit()
+
+    return {
+        "deleted_id": str(row_id),
         "rows": _settlements_payload(request=request),
     }
 
@@ -1446,6 +1701,11 @@ def _import_settlements_payload(rows_value: Any, request: FastAPIRequest | None 
 
     with _connect() as connection:
         _ensure_settlement_table(connection)
+        with connection.cursor() as cursor:
+            known_product_codes = _settlement_product_code_map(cursor)
+        for row in normalized_rows:
+            if not row["product_code"]:
+                row["product_code"] = known_product_codes.get(_settlement_product_name_key(row.get("product_name"))) or None
         existing_keys: set[tuple[str, str, str, str]] = set()
         key_placeholders = ", ".join(["(%s, %s, %s, %s)"] * len(normalized_rows))
         key_params: list[Any] = []
@@ -1454,20 +1714,34 @@ def _import_settlements_payload(rows_value: Any, request: FastAPIRequest | None 
         with connection.cursor() as cursor:
             cursor.execute(
                 f"""
-                SELECT settlement_date, ip_name, product_name, article_type
+                SELECT id, settlement_date, ip_name, product_code, article_type
                 FROM {SETTLEMENT_TABLE}
-                WHERE (settlement_date, ip_name, product_name, article_type) IN ({key_placeholders})
+                WHERE (settlement_date, ip_name, product_code, article_type) IN ({key_placeholders})
                 """,
                 tuple(key_params),
             )
+            existing_ids: dict[tuple[str, str, str, str], int] = {}
             for row in cursor.fetchall():
-                existing_keys.add(_settlement_identity_key(row))
+                key = _settlement_identity_key(row)
+                existing_keys.add(key)
+                existing_ids.setdefault(key, int(row.get("id") or 0))
 
         placeholders = ", ".join(["%s"] * len(SETTLEMENT_DB_COLUMNS))
-        update_columns = [column for column in SETTLEMENT_DB_COLUMNS if column not in {"settlement_date", "ip_name", "product_name", "article_type"}]
+        update_columns = [column for column in SETTLEMENT_DB_COLUMNS if column not in {"settlement_date", "ip_name", "product_code", "article_type"}]
         update_sql = _settlement_import_update_sql(update_columns)
         with connection.cursor() as cursor:
             for row in normalized_rows:
+                existing_id = existing_ids.get(_settlement_identity_key(row))
+                if existing_id:
+                    cursor.execute(
+                        f"""
+                        INSERT INTO {SETTLEMENT_TABLE} (id, {", ".join(SETTLEMENT_DB_COLUMNS)})
+                        VALUES (%s, {placeholders})
+                        ON DUPLICATE KEY UPDATE {update_sql}
+                        """,
+                        (existing_id, *tuple(row[column] for column in SETTLEMENT_DB_COLUMNS)),
+                    )
+                    continue
                 cursor.execute(
                     f"""
                     INSERT INTO {SETTLEMENT_TABLE} ({", ".join(SETTLEMENT_DB_COLUMNS)})
@@ -1609,6 +1883,7 @@ def _settlements_template_xlsx() -> bytes:
         "partner": "示例合作方",
         "deliveryPlatform": "理财通",
         "product": "示例产品",
+        "productCode": "000001",
         "ipName": "示例IP",
         "fansCount": "",
         "articleType": "加仓贴",
@@ -1624,7 +1899,7 @@ def _settlements_template_xlsx() -> bytes:
         "likeCount": "",
         "partnerPaymentStatus": "未打款",
         "creatorSettlementStatus": "未结算",
-        "notes": "日期 + IP名称 + 产品 + 文章类型用于去重；产品和文章类型可为空，空值会参与去重",
+        "notes": "日期 + IP名称 + 代码 + 文章类型用于去重；产品仅用于展示，不再参与唯一键",
     }
     worksheet.append([sample_row.get(field, "") for field in fields])
 
@@ -1635,13 +1910,18 @@ def _settlements_template_xlsx() -> bytes:
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
     for row_cells in worksheet.iter_rows(min_row=2):
-        for cell in row_cells:
+        for column_index, cell in enumerate(row_cells, start=1):
             cell.alignment = Alignment(vertical="center", wrap_text=True)
+            if fields[column_index - 1] == "productCode":
+                cell.value = _clean_settlement_product_code(cell.value)
+                cell.number_format = "@"
 
     for column_index, field in enumerate(fields, start=1):
         column_letter = get_column_letter(column_index)
         if field in {"link", "screenshot", "articleTitle", "notes", "product"}:
             worksheet.column_dimensions[column_letter].width = 38
+        elif field == "productCode":
+            worksheet.column_dimensions[column_letter].width = 14
         elif field in SETTLEMENT_EXPORT_NUMERIC_FIELDS:
             worksheet.column_dimensions[column_letter].width = 14
         else:
@@ -1734,7 +2014,10 @@ def _settlements_xlsx_payload(payload: dict[str, Any]) -> bytes:
         for column_index, field in enumerate(fields, start=1):
             cell = worksheet.cell(row=row_index, column=column_index)
             cell.alignment = Alignment(vertical="center", wrap_text=field in {"articleTitle", "notes"})
-            if field in SETTLEMENT_EXPORT_NUMERIC_FIELDS and cell.value not in ("", None):
+            if field == "productCode":
+                cell.value = _clean_settlement_product_code(cell.value)
+                cell.number_format = "@"
+            elif field in SETTLEMENT_EXPORT_NUMERIC_FIELDS and cell.value not in ("", None):
                 cell.value = _settlement_export_number(cell.value)
                 cell.number_format = "0.00" if field in SETTLEMENT_EXPORT_MONEY_FIELDS else "0"
         if screenshot_column:
@@ -1760,6 +2043,8 @@ def _settlements_xlsx_payload(payload: dict[str, Any]) -> bytes:
         column_letter = get_column_letter(column_index)
         if field in {"link", "articleTitle", "product"}:
             worksheet.column_dimensions[column_letter].width = 42
+        elif field == "productCode":
+            worksheet.column_dimensions[column_letter].width = 14
         elif field == "screenshot":
             worksheet.column_dimensions[column_letter].width = min(255, max(58, max_screenshot_width / 7 if max_screenshot_width else 58))
         elif field in SETTLEMENT_EXPORT_NUMERIC_FIELDS:
@@ -2196,8 +2481,17 @@ def _tencent_doc_headers() -> dict[str, str]:
     access_token = config.get("TENCENT_DOC_ACCESS_TOKEN", "").strip()
     client_id = config.get("TENCENT_DOC_CLIENT_ID", "").strip()
     open_id = config.get("TENCENT_DOC_OPEN_ID", "").strip()
+    client_secret = config.get("TENCENT_DOC_CLIENT_SECRET", "").strip()
     if not (access_token and client_id and open_id):
         return {}
+    expiry = _tencent_doc_access_token_expiry(access_token)
+    if expiry and expiry <= datetime.now(timezone.utc).astimezone():
+        message = f"腾讯文档 Access-Token 已过期（{expiry.strftime('%Y-%m-%d %H:%M:%S %z')}）"
+        if client_secret:
+            message += "，请更新 crawler_app.app_config 中的 TENCENT_DOC_ACCESS_TOKEN；当前已配置 TENCENT_DOC_CLIENT_SECRET，后续可以接入自动换 token"
+        else:
+            message += "，请更新 crawler_app.app_config 中的 TENCENT_DOC_ACCESS_TOKEN；当前 TENCENT_DOC_CLIENT_SECRET 为空，无法自动换 token"
+        raise ValueError(message)
     return {
         "Access-Token": access_token,
         "Client-Id": client_id,
@@ -2207,16 +2501,23 @@ def _tencent_doc_headers() -> dict[str, str]:
 
 
 def _load_tencent_doc_config_from_app_config() -> dict[str, str]:
-    keys = ("TENCENT_DOC_ACCESS_TOKEN", "TENCENT_DOC_CLIENT_ID", "TENCENT_DOC_OPEN_ID")
+    keys = (
+        "TENCENT_DOC_ACCESS_TOKEN",
+        "TENCENT_DOC_CLIENT_ID",
+        "TENCENT_DOC_OPEN_ID",
+        "TENCENT_DOC_CLIENT_SECRET",
+        "TENCENT_DOC_TOKEN_URL",
+    )
+    placeholders = ", ".join(["%s"] * len(keys))
     try:
         with _connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT config_key, config_value
                     FROM crawler_app.app_config
                     WHERE status = 'active'
-                      AND config_key IN (%s, %s, %s)
+                      AND config_key IN ({placeholders})
                       AND config_value IS NOT NULL
                       AND config_value <> ''
                     """,
@@ -2230,6 +2531,24 @@ def _load_tencent_doc_config_from_app_config() -> dict[str, str]:
         for row in rows
         if str(row.get("config_key") or "") in keys
     }
+
+
+def _tencent_doc_access_token_expiry(access_token: str) -> datetime | None:
+    parts = access_token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload_text = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)).decode("utf-8", errors="replace")
+        payload = json.loads(payload_text)
+    except Exception:
+        return None
+    exp_value = payload.get("exp") if isinstance(payload, dict) else None
+    try:
+        if exp_value is None:
+            return None
+        return datetime.fromtimestamp(float(exp_value), tz=timezone.utc).astimezone()
+    except (TypeError, ValueError, OSError):
+        return None
 
 
 def _tencent_openapi_json(path_or_url: str) -> Any:
@@ -2767,6 +3086,15 @@ def create_app() -> FastAPI:
     def update_settlement_engagement(request: FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             return _update_settlement_engagement_payload(payload, request)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.delete("/api/settlements/{settlement_id}")
+    def delete_settlement(request: FastAPIRequest, settlement_id: int) -> dict[str, Any]:
+        try:
+            return _delete_settlement_payload(settlement_id, request)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:

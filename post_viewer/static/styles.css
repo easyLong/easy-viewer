@@ -657,17 +657,92 @@ textarea {
 }
 
 .settlement-head {
-  align-items: center;
+  align-items: flex-start;
   display: flex;
   gap: 12px;
   justify-content: space-between;
 }
 
+.settlement-title-block {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settlement-key-notice {
+  align-items: center;
+  background: #fff8f7;
+  border: 1px solid #fecdca;
+  border-radius: 6px;
+  box-shadow: inset 3px 0 0 #d92d20;
+  color: #344054;
+  display: inline-flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 6px;
+  line-height: 1.25;
+  max-width: 100%;
+  padding: 5px 8px 5px 10px;
+  width: fit-content;
+}
+
+.settlement-key-alert {
+  background: #d92d20;
+  border-radius: 4px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 4px 6px;
+}
+
+.settlement-key-rule {
+  color: #912018;
+  font-weight: 800;
+}
+
+.settlement-key-note {
+  font-weight: 600;
+}
+
+.settlement-key-group {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.settlement-key-token {
+  background: #ffffff;
+  border: 1px solid #c7d7fe;
+  border-radius: 4px;
+  color: #1849a9;
+  font-family: var(--mono);
+  font-weight: 700;
+  padding: 2px 6px;
+}
+
+.settlement-key-plus {
+  color: #667085;
+  font-weight: 700;
+}
+
+.settlement-key-note {
+  border-left: 1px solid #ead5d8;
+  color: #b42318;
+  margin-left: 2px;
+  padding-left: 8px;
+}
+
 .settlement-actions {
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+  position: relative;
+  z-index: 1;
 }
 
 .settlement-summary {
@@ -1107,6 +1182,32 @@ textarea {
 
 .mysql-status-pending {
   color: #b54708;
+}
+
+.settlement-operation-cell {
+  min-width: 64px;
+  text-align: center;
+}
+
+.settlement-delete-button {
+  background: #fff;
+  border: 1px solid #f0a6a0;
+  border-radius: 3px;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 400;
+  min-height: 26px;
+  padding: 0 8px;
+}
+
+.settlement-delete-button:hover {
+  background: #fff5f4;
+  border-color: var(--danger);
+}
+
+.settlement-delete-button:disabled {
+  cursor: wait;
 }
 
 .mysql-empty-row {
